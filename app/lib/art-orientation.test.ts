@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { balanceBySource, landscapeFirstPool } from "./art-orientation";
+import { balanceBySource, landscapeFirstPool, orientationPoolForCurator } from "./art-orientation";
 
 type Candidate = { id: string; aspectRatio?: number };
 
@@ -29,6 +29,26 @@ describe("landscapeFirstPool", () => {
       { id: "square", aspectRatio: 1 },
     ]);
     expect(result.map((candidate) => candidate.id)).toEqual(["square"]);
+  });
+});
+
+describe("orientationPoolForCurator", () => {
+  it("keeps square works when the landscape pool is thin", () => {
+    const result = orientationPoolForCurator<Candidate>([
+      { id: "landscape", aspectRatio: 1.4 },
+      { id: "square", aspectRatio: 1 },
+      { id: "portrait", aspectRatio: 0.7 },
+    ]);
+    expect(result.map((candidate) => candidate.id)).toEqual(["landscape", "square"]);
+  });
+
+  it("stays landscape-only when enough landscapes exist", () => {
+    const landscapes = Array.from({ length: 6 }, (_, index) => ({ id: `l${index}`, aspectRatio: 1.5 }));
+    const result = orientationPoolForCurator<Candidate>([
+      ...landscapes,
+      { id: "square", aspectRatio: 1 },
+    ]);
+    expect(result.map((candidate) => candidate.id)).toEqual(landscapes.map((candidate) => candidate.id));
   });
 });
 

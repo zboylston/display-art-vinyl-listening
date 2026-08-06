@@ -32,6 +32,22 @@ describe("selectCatalogTrack", () => {
     expect(selectCatalogTrack("Hiss Golden Messenger", "In the Middle of It", candidates, "I'm People")?.collectionId).toBe(2);
     expect(selectCatalogTrack("Hiss Golden Messenger", "In the Middle of It", candidates)?.collectionId).toBe(2);
   });
+
+  it("prefers the full album even when AudD points at the standalone single", () => {
+    const candidates = [
+      { artistName: "Hiss Golden Messenger", trackName: "In the Middle of It", collectionName: "In the Middle of It - Single", collectionId: 1, trackCount: 1 },
+      { artistName: "Hiss Golden Messenger", trackName: "In the Middle of It", collectionName: "I'm People", collectionId: 2, trackCount: 12 },
+    ];
+    expect(selectCatalogTrack("Hiss Golden Messenger", "In the Middle of It", candidates, "In the Middle of It - Single")?.collectionId).toBe(2);
+  });
+
+  it("prefers the parent album over a multi-track single EP with the same song", () => {
+    const candidates = [
+      { artistName: "Hiss Golden Messenger", trackName: "In the Middle of It", collectionName: "Shaky Eyes - Single", collectionId: 3, trackCount: 2 },
+      { artistName: "Hiss Golden Messenger", trackName: "In the Middle of It", collectionName: "I'm People", collectionId: 2, trackCount: 12 },
+    ];
+    expect(selectCatalogTrack("Hiss Golden Messenger", "In the Middle of It", candidates, "Shaky Eyes - Single")?.collectionId).toBe(2);
+  });
 });
 
 describe("largeAlbumArtwork", () => {

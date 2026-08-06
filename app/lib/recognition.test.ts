@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canonicalTrackKey, noMatchRetryDelay, RecognitionGate } from "./recognition";
+import { canonicalTrackKey, noMatchRetryDelay, RecognitionGate, textTrackKey } from "./recognition";
 
 describe("canonicalTrackKey", () => {
   it("uses ISRC when available", () => {
@@ -9,6 +9,13 @@ describe("canonicalTrackKey", () => {
   it("deduplicates punctuation and casing without relying on album metadata", () => {
     expect(canonicalTrackKey({ artist: "Beyoncé", title: "Hello!" }))
       .toBe(canonicalTrackKey({ artist: "BEYONCE", title: "hello" }));
+  });
+});
+
+describe("textTrackKey", () => {
+  it("ignores ISRC so vinyl sequence tracks match AudD results", () => {
+    expect(textTrackKey({ isrc: "US-ABC-12-34567", artist: "Hiss Golden Messenger", title: "In the Middle of It" }))
+      .toBe(textTrackKey({ artist: "Hiss Golden Messenger", title: "In the Middle of It" }));
   });
 });
 

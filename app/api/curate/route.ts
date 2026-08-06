@@ -1,6 +1,16 @@
 import OpenAI from "openai";
 import { NextResponse } from "next/server";
-import { balanceBySource, landscapeFirstPool, MIN_LANDSCAPE_RATIO } from "../../lib/art-orientation";
+import { balanceBySource, MIN_LANDSCAPE_RATIO, orientationPoolForCurator } from "../../lib/art-orientation";
+import {
+  cleanTrackPayload,
+  normalizeBrief,
+  normalizeDossier,
+  sanitizeMuseumSearchTerms,
+  strings,
+  type CleanTrack,
+  type SongDossier,
+  type VisualBrief,
+} from "../../lib/visual-brief";
 
 const metApi = "https://collectionapi.metmuseum.org/public/collection/v1";
 const clevelandApi = "https://openaccess-api.clevelandart.org/api/artworks/";
@@ -8,23 +18,7 @@ const chicagoApi = "https://api.artic.edu/api/v1/artworks/search";
 const model = "gpt-5.6-sol";
 type ArtSource = "met" | "cleveland" | "artic";
 
-type Track = { artist?: string; title?: string; album?: string; year?: string };
-type VisualBrief = {
-  semantic_anchors: string[];
-  sonic_character: string[];
-  emotional_tone: string[];
-  formal_qualities: string[];
-  cultural_context: string[];
-  visual_direction: string[];
-  avoid: string[];
-  mood: string[];
-  energy: "low" | "medium" | "high";
-  palette: string[];
-  visual_motifs: string[];
-  art_movements: string[];
-  museum_search_terms: string[];
-  curatorial_rationale: string;
-};
+type Track = { artist?: string; title?: string; album?: string; year?: string; genre?: string };
 type Candidate = {
   id: string;
   source: ArtSource;
@@ -51,6 +45,7 @@ const MAX_VISUAL_CANDIDATES = 18;
 const SEMIFINAL_BATCH_SIZE = 6;
 const SEMIFINALISTS_PER_BATCH = 2;
 const EXTERNAL_RESULTS_PER_TERM = 12;
+const MIN_SEARCH_TERMS = 8;
 const MIN_DISPLAY_RATIO = 0.55;
 const MAX_DISPLAY_RATIO = 2.8;
 const FINE_ART_TERMS = /\b(painting|print|drawing|photograph|photography|watercolor|watercolour|pastel|lithograph|etching|engraving|woodcut|monotype|collage)\b/i;
@@ -63,45 +58,79 @@ function jsonFromModel(text: string): unknown {
   return JSON.parse(text.slice(start, end + 1));
 }
 
-function strings(value: unknown, limit: number) {
-  return Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === "string").map((item) => item.trim()).filter(Boolean).slice(0, limit)
-    : [];
-}
-
-function normalizeBrief(value: unknown): VisualBrief {
-  if (!value || typeof value !== "object") throw new Error("The visual-brief response was incomplete.");
-  const brief = value as Record<string, unknown>;
-  const terms = strings(brief.museum_search_terms, 10);
-  if (!terms.length) throw new Error("The visual brief did not provide museum search terms.");
-  const energy = brief.energy === "low" || brief.energy === "medium" || brief.energy === "high" ? brief.energy : "medium";
-  return {
-    semantic_anchors: strings(brief.semantic_anchors, 6),
-    sonic_character: strings(brief.sonic_character, 6),
-    emotional_tone: strings(brief.emotional_tone, 6),
-    formal_qualities: strings(brief.formal_qualities, 6),
-    cultural_context: strings(brief.cultural_context, 4),
-    visual_direction: strings(brief.visual_direction, 6),
-    avoid: strings(brief.avoid, 8),
-    mood: strings(brief.mood, 6),
-    energy,
-    palette: strings(brief.palette, 5),
-    visual_motifs: strings(brief.visual_motifs, 8),
-    art_movements: strings(brief.art_movements, 3),
-    museum_search_terms: terms,
-    curatorial_rationale: typeof brief.curatorial_rationale === "string" ? brief.curatorial_rationale.trim() : "",
-  };
-}
-
-async function createBrief(client: OpenAI, track: Track) {
+async function createDossier(client: OpenAI, track: CleanTrack): Promise<SongDossier> {
   const response = await client.responses.create({
     model,
     input: [
-      { role: "developer", content: "Create nuanced visual-art direction for a music-listening experience. Build connections through meaning, feeling, cultural context, and visible formal qualities; do not reduce the track to its title. Treat cultural knowledge as interpretive rather than verified fact. Never quote, summarize, or claim lyrics. Do not name specific artworks or artists. Return JSON only." },
-      { role: "user", content: `Track identity: ${JSON.stringify(track)}\n\nReturn exactly these JSON keys:\n- semantic_anchors: 3-6 concepts suggested by the track identity or context\n- sonic_character: 3-6 interpretive descriptors of space, rhythm, texture, or motion\n- emotional_tone: 3-6 emotional qualities\n- formal_qualities: 3-6 visible compositional qualities that could echo the music\n- cultural_context: up to 4 cautious contextual associations\n- visual_direction: 3-6 requirements for an artwork that can hold a room on a large television\n- avoid: 4-8 clichés, overly literal treatments, portraits, or weak decorative approaches\n- mood: 3-6 adjectives\n- energy: low|medium|high\n- palette: 3-5 colors\n- visual_motifs: 4-8 concrete visible motifs\n- art_movements: up to 3\n- museum_search_terms: exactly 10 diverse museum-catalog queries of 1-4 common words each\n- curatorial_rationale: exactly 2 sentences\n\nDiversify the ten searches across thematic subjects, atmosphere or setting, composition or form, palette or light, and movement or cultural context. At most one query may directly echo the track title. Do not use artist names, instruments, or music/audio words as search queries.` },
+      {
+        role: "developer",
+        content: "You are preparing a song dossier for visual curation. Be honest about what you know. Prefer album, artist-era, genre, and scene priors when track-level knowledge is thin. Never quote or invent lyrics. Never name specific artworks. Return JSON only.",
+      },
+      {
+        role: "user",
+        content: `Track identity: ${JSON.stringify(track)}\n\nReturn exactly these JSON keys:\n- confidence: high|medium|low — high only if you know this specific recording beyond the title words\n- known_facts: up to 6 short facts you are reasonably sure about\n- uncertain: up to 6 things you are guessing or do not know\n- sonic_and_thematic_reading: 2-4 sentences on feel, setting, and themes; if confidence is low, lean on album/artist/genre priors and say so\n- literal_traps_to_avoid: up to 6 title-literal or cliché visual traps\n- artist_or_album_priors: up to 6 concrete place, era, landscape, or cultural priors useful for museum search`,
+      },
     ],
   });
-  return normalizeBrief(jsonFromModel(response.output_text));
+  return normalizeDossier(jsonFromModel(response.output_text));
+}
+
+async function createVisualPlan(client: OpenAI, track: CleanTrack, dossier: SongDossier): Promise<VisualBrief> {
+  const lowConfidenceNote = dossier.confidence === "low" || dossier.confidence === "medium"
+    ? "Knowledge is limited. Weight album, artist-era, genre, and artist_or_album_priors over title wordplay. Do not invent a fake intimate reading of the track."
+    : "You may use track-specific knowledge, still avoiding lyric claims and title-only illustration.";
+
+  const response = await client.responses.create({
+    model,
+    input: [
+      {
+        role: "developer",
+        content: "Create nuanced visual-art direction for a music-listening experience on a large television. Build connections through meaning, feeling, cultural context, and visible formal qualities. Treat cultural knowledge as interpretive. Never quote lyrics. Do not name specific artworks or museum artists. Return JSON only.",
+      },
+      {
+        role: "user",
+        content: `Track identity: ${JSON.stringify(track)}\nSong dossier: ${JSON.stringify(dossier)}\n\n${lowConfidenceNote}\n\nReturn exactly these JSON keys:\n- semantic_anchors: 3-6 concepts grounded in the dossier\n- sonic_character: 3-6 descriptors of space, rhythm, texture, or motion\n- emotional_tone: 3-6 emotional qualities\n- formal_qualities: 3-6 visible compositional qualities\n- cultural_context: up to 4 cautious associations\n- visual_direction: 3-6 requirements for room-scale television display\n- avoid: 4-8 clichés, title-literal traps from the dossier, portraits, weak decorative approaches\n- mood: 3-6 adjectives\n- energy: low|medium|high\n- palette: 3-5 colors\n- visual_motifs: 4-8 concrete visible motifs museums can catalog\n- art_movements: up to 3\n- museum_search_terms: exactly 10 retrieval-native museum-catalog queries of 1-4 common words each\n- curatorial_rationale: exactly 2 sentences\n\nSearch-term mix: 3 tight thematic subjects, 3 settings/atmospheres, 2 formal/light queries, 2 broader wildcards. Prefer concrete nouns museums index (dirt road, porch light, winter trees, empty highway, southern dusk). At most one query may echo the track title. Do not use artist names, instruments, or music/audio words.`,
+      },
+    ],
+  });
+  return normalizeBrief(jsonFromModel(response.output_text), dossier, track);
+}
+
+async function refillSearchTerms(client: OpenAI, track: CleanTrack, dossier: SongDossier, brief: VisualBrief): Promise<string[]> {
+  const needed = 10 - brief.museum_search_terms.length;
+  if (needed <= 0) return brief.museum_search_terms;
+  const response = await client.responses.create({
+    model,
+    input: [
+      {
+        role: "developer",
+        content: "Generate replacement museum catalog search queries. Return JSON only.",
+      },
+      {
+        role: "user",
+        content: `Track: ${JSON.stringify(track)}\nDossier priors: ${JSON.stringify(dossier.artist_or_album_priors)}\nMotifs: ${JSON.stringify(brief.visual_motifs)}\nAlready kept: ${JSON.stringify(brief.museum_search_terms)}\n\nReturn {"museum_search_terms":[...]} with ${needed + 4} new 1-4 word concrete catalog queries that are not duplicates of the kept list. No artist names, instruments, or music/audio words.`,
+      },
+    ],
+  });
+  const parsed = jsonFromModel(response.output_text) as { museum_search_terms?: unknown };
+  return sanitizeMuseumSearchTerms(
+    [...brief.museum_search_terms, ...strings(parsed.museum_search_terms, 16)],
+    track,
+    10,
+  );
+}
+
+async function createBrief(client: OpenAI, track: CleanTrack): Promise<VisualBrief> {
+  const dossier = await createDossier(client, track);
+  let brief = await createVisualPlan(client, track, dossier);
+  if (brief.museum_search_terms.length < MIN_SEARCH_TERMS) {
+    const terms = await refillSearchTerms(client, track, dossier, brief);
+    brief = { ...brief, museum_search_terms: terms };
+  }
+  if (!brief.museum_search_terms.length) {
+    throw new Error("The visual brief did not provide usable museum search terms.");
+  }
+  return brief;
 }
 
 async function searchMet(term: string) {
@@ -382,7 +411,7 @@ function validCandidateIds(value: unknown, candidates: CuratorCandidate[], limit
   return [...new Set(ids)];
 }
 
-async function chooseSemifinalists(client: OpenAI, brief: VisualBrief, candidates: CuratorCandidate[]) {
+async function chooseSemifinalists(client: OpenAI, track: CleanTrack, brief: VisualBrief, candidates: CuratorCandidate[]) {
   if (candidates.length <= SEMIFINALISTS_PER_BATCH) return candidates;
   const response = await client.responses.create({
     model,
@@ -391,7 +420,7 @@ async function chooseSemifinalists(client: OpenAI, brief: VisualBrief, candidate
       {
         role: "user",
         content: [
-          { type: "input_text", text: `Visual brief and anti-brief: ${JSON.stringify(brief)}\n\nChoose the strongest ${SEMIFINALISTS_PER_BATCH} distinct candidates. A successful pairing needs at least one semantic connection, one emotional or sonic connection, and one compelling visual reason. Judge the actual images, not title coincidence. Prefer original interpretations and strong room-scale landscape compositions. Return exactly {"candidateIds":["source:id","source:id"]}, ranked best first.` },
+          { type: "input_text", text: `Track: ${JSON.stringify(track)}\nSong dossier confidence: ${brief.confidence}\nDossier reading: ${brief.dossier.sonic_and_thematic_reading}\nVisual brief and anti-brief: ${JSON.stringify({ semantic_anchors: brief.semantic_anchors, sonic_character: brief.sonic_character, emotional_tone: brief.emotional_tone, avoid: brief.avoid, visual_motifs: brief.visual_motifs, mood: brief.mood, energy: brief.energy })}\n\nChoose the strongest ${SEMIFINALISTS_PER_BATCH} distinct candidates that actually fit the brief. Reject gorgeous but off-brief works. A successful pairing needs at least one semantic_anchors connection, one emotional or sonic connection, and one compelling visual reason. Judge the actual images, not title coincidence. Prefer strong room-scale compositions when they also fit the brief. Return exactly {"candidateIds":["source:id","source:id"]}, ranked best first.` },
           ...candidates.flatMap((candidate) => candidateContent(candidate, "low")),
         ],
       },
@@ -407,7 +436,7 @@ async function chooseSemifinalists(client: OpenAI, brief: VisualBrief, candidate
   return chosen;
 }
 
-async function chooseCandidate(client: OpenAI, brief: VisualBrief, candidates: CuratorCandidate[]) {
+async function chooseCandidate(client: OpenAI, track: CleanTrack, brief: VisualBrief, candidates: CuratorCandidate[]) {
   const response = await client.responses.create({
     model,
     input: [
@@ -415,7 +444,7 @@ async function chooseCandidate(client: OpenAI, brief: VisualBrief, candidates: C
       {
         role: "user",
         content: [
-          { type: "input_text", text: `Visual brief and anti-brief: ${JSON.stringify(brief)}\n\nScore comparatively using: sonic and emotional resonance 30%, thematic resonance 20%, visual strength on television 20%, interpretive originality 15%, historical or cultural connection 10%, and provenance confidence 5%. Apply explicit penalties: generic or decorative -20; obvious title illustration without deeper connection -15; artist or musician portrait -25; weak television composition -20; rationale requiring invented facts -30. A successful winner must have a semantic connection, an emotional or sonic connection, and a compelling visual reason.\n\nReturn exactly {"candidateId":"source:id","alternativeIds":["source:id","source:id"],"rationale":"two concise sentences explaining visible and interpretive connections without invented facts"}.` },
+          { type: "input_text", text: `Track: ${JSON.stringify(track)}\nSong dossier: ${JSON.stringify(brief.dossier)}\nVisual brief and anti-brief: ${JSON.stringify(brief)}\n\nScore comparatively using: brief fidelity and thematic resonance 35%, sonic and emotional resonance 25%, visual strength on television 15%, interpretive originality 10%, historical or cultural connection 10%, and provenance confidence 5%. Apply explicit penalties: generic or decorative -25; gorgeous but off-brief -30; obvious title illustration without deeper connection -20; artist or musician portrait -25; weak television composition -15; rationale requiring invented facts -30. A successful winner must name which semantic_anchors or motifs it supports, plus an emotional or sonic connection and a visual reason.\n\nReturn exactly {"candidateId":"source:id","alternativeIds":["source:id","source:id"],"matchedAnchors":["anchor","anchor"],"rationale":"two concise sentences explaining visible and interpretive connections without invented facts"}.` },
           ...candidates.flatMap((candidate) => candidateContent(candidate, "high")),
         ],
       },
@@ -437,12 +466,17 @@ export async function POST(request: Request) {
   try {
     if (!process.env.OPENAI_API_KEY) return NextResponse.json({ error: "OpenAI is not configured." }, { status: 503 });
     const payload = await request.json().catch(() => ({})) as { track?: Track };
-    const track = payload.track ?? {};
-    if (!track.artist || !track.title) return NextResponse.json({ error: "A recognized artist and title are required for curation." }, { status: 400 });
+    const track = cleanTrackPayload(payload.track ?? {});
+    if (!track) return NextResponse.json({ error: "A recognized artist and title are required for curation." }, { status: 400 });
 
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
     const brief = await createBrief(client, track);
-    console.info("[curate] visual brief", JSON.stringify({ track: `${track.artist} — ${track.title}`, terms: brief.museum_search_terms }));
+    console.info("[curate] visual brief", JSON.stringify({
+      track: `${track.artist} — ${track.title}`,
+      confidence: brief.confidence,
+      genre: track.genre ?? null,
+      terms: brief.museum_search_terms,
+    }));
     const safeTerms = <T,>(search: (term: string) => Promise<T[]>) => Promise.all(
       brief.museum_search_terms.map((term) => search(term).catch((error) => {
         console.warn(`[curate] provider search failed term=${term}`, error instanceof Error ? error.message : error);
@@ -463,7 +497,7 @@ export async function POST(request: Request) {
     const probePool = balanceBySource(fineArt, MAX_FINE_ART_TO_PROBE);
     const withImages = (await Promise.all(probePool.map(withDisplayableImage)))
       .filter((candidate): candidate is Candidate => candidate !== null);
-    const orientationPool = landscapeFirstPool(withImages);
+    const orientationPool = orientationPoolForCurator(withImages);
     const selectionPool = balanceBySource(orientationPool, MAX_CURATOR_IMAGE_FETCH);
     const curatorReady = (await Promise.all(selectionPool.map(withCuratorImage)))
       .filter((candidate): candidate is CuratorCandidate => candidate !== null);
@@ -489,9 +523,9 @@ export async function POST(request: Request) {
     for (let index = 0; index < curatorPool.length; index += SEMIFINAL_BATCH_SIZE) {
       batches.push(curatorPool.slice(index, index + SEMIFINAL_BATCH_SIZE));
     }
-    const finalists = (await Promise.all(batches.map((batch) => chooseSemifinalists(client, brief, batch)))).flat();
+    const finalists = (await Promise.all(batches.map((batch) => chooseSemifinalists(client, track, brief, batch)))).flat();
     console.info("[curate] visual judging", JSON.stringify({ batches: batches.map((batch) => batch.length), finalists: finalists.map((candidate) => candidate.id) }));
-    const { selected, alternatives, rationale } = await chooseCandidate(client, brief, finalists);
+    const { selected, alternatives, rationale } = await chooseCandidate(client, track, brief, finalists);
     const publicArtwork = (candidate: Candidate) => ({
       id: candidate.id,
       source: candidate.source,

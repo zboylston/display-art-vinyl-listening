@@ -1,9 +1,24 @@
 export const VINYL_BOUNDARY_EARLY_MS = 12_000;
 export const VINYL_BOUNDARY_LATE_MS = 45_000;
+/** Ignore heartbeat re-anchors that jump the predicted ending by more than this. */
+export const VINYL_BOUNDARY_REFINE_MAX_DELTA_MS = 20_000;
 
 export function remainingTrackMs(durationMs?: number, timecodeMs?: number) {
   if (!durationMs || durationMs <= 0) return undefined;
   return Math.max(5_000, durationMs - Math.max(0, timecodeMs ?? 0));
+}
+
+/**
+ * Apply a heartbeat/pre-transition boundary estimate only when it agrees with
+ * the existing prediction. Large jumps usually mean a noisy fingerprint, not a
+ * real timing correction — keeping the prior boundary avoids mid-song advances.
+ */
+export function refinedVinylBoundaryAt(currentBoundaryAt: number, proposedBoundaryAt: number) {
+  if (!proposedBoundaryAt) return currentBoundaryAt;
+  if (!currentBoundaryAt) return proposedBoundaryAt;
+  return Math.abs(proposedBoundaryAt - currentBoundaryAt) <= VINYL_BOUNDARY_REFINE_MAX_DELTA_MS
+    ? proposedBoundaryAt
+    : currentBoundaryAt;
 }
 
 /**

@@ -4,6 +4,8 @@ export type SourcedCandidate = { source: string };
 export const MIN_LANDSCAPE_RATIO = 1.12;
 export const MIN_SQUAREISH_RATIO = 0.9;
 const TELEVISION_RATIO = 16 / 9;
+/** Below this many landscapes, keep square works in the curator pool. */
+export const THIN_LANDSCAPE_POOL = 6;
 
 function closestToTelevision<T extends OrientedCandidate>(candidates: T[]): T[] {
   return [...candidates].sort((left, right) => (
@@ -30,6 +32,24 @@ export function landscapeFirstPool<T extends OrientedCandidate>(candidates: T[])
   const unknown = candidates.filter((candidate) => candidate.aspectRatio === undefined);
   if (unknown.length) return unknown;
 
+  return closestToTelevision(candidates);
+}
+
+/**
+ * When few landscapes survive search, keep square/near-square works so thematic
+ * hits are not discarded solely for orientation.
+ */
+export function orientationPoolForCurator<T extends OrientedCandidate>(candidates: T[]): T[] {
+  const landscape = candidates.filter((candidate) => (candidate.aspectRatio ?? 0) >= MIN_LANDSCAPE_RATIO);
+  if (landscape.length >= THIN_LANDSCAPE_POOL) return closestToTelevision(landscape);
+
+  const squareish = candidates.filter((candidate) => {
+    const ratio = candidate.aspectRatio ?? 0;
+    return ratio >= MIN_SQUAREISH_RATIO && ratio < MIN_LANDSCAPE_RATIO;
+  });
+  const unknown = candidates.filter((candidate) => candidate.aspectRatio === undefined);
+  const preferred = [...closestToTelevision(landscape), ...closestToTelevision(squareish), ...unknown];
+  if (preferred.length) return preferred;
   return closestToTelevision(candidates);
 }
 
