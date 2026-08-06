@@ -1,4 +1,4 @@
-# Music Art
+# Needle & Frame
 
 Artwork curation uses a landscape-first, museum-verified comparative funnel. A nuanced visual brief and anti-brief generate ten diversified searches across the Met, Cleveland Museum of Art, and Art Institute of Chicago. Up to eighteen actual candidate images are judged in comparative semifinals; the six finalists are then scored for emotional and thematic resonance, television-scale composition, originality, cultural connection, provenance, and explicit cliché penalties. The API response includes the winner and two alternatives.
 
