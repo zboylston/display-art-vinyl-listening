@@ -6,6 +6,17 @@ export function remainingTrackMs(durationMs?: number, timecodeMs?: number) {
   return Math.max(5_000, durationMs - Math.max(0, timecodeMs ?? 0));
 }
 
+/**
+ * AudD's timecode identifies the song position of the rolling fragment we
+ * submit, rather than the wall-clock instant when its response arrives. Our
+ * ring buffer ends at capture time, so advance the reported position by the
+ * captured window before scheduling the next record boundary.
+ */
+export function timecodeAtCaptureMs(timecodeMs: number | undefined, sampleDurationMs = 0, elapsedSinceCaptureMs = 0) {
+  if (timecodeMs === undefined) return undefined;
+  return Math.max(0, timecodeMs + Math.max(0, sampleDurationMs) + Math.max(0, elapsedSinceCaptureMs));
+}
+
 export function isNearVinylBoundary(boundaryAt: number, now: number) {
   if (!boundaryAt) return false;
   const remaining = boundaryAt - now;

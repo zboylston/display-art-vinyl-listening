@@ -62,3 +62,11 @@
 @media(max-width:800px){
   .vinyl-badge{top:1rem;right:1rem;bottom:auto;max-width:calc(100vw - 2rem)}
 }
+
+/* Keep the work continuous as the description dissolves: no remounted-image flash. */
+.gallery .gallery-artwork{animation:none}
+.gallery-overlay{position:absolute;z-index:2;inset:0;pointer-events:none;background:linear-gradient(90deg,rgba(27,24,19,.12),rgba(27,24,19,0));animation:gallery-overlay-clear 1.5s ease-out both}
+.gallery.is-returning{background:#1b1813}
+.gallery.is-returning::after{background:rgba(27,24,19,.16);animation:return-dark-arrive 3.2s cubic-bezier(.45,0,.55,1) both}
+@keyframes gallery-overlay-clear{from{opacity:1}to{opacity:0}}
+@keyframes return-dark-arrive{from{opacity:0}to{opacity:1}}

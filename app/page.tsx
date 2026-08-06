@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { AudioChangeDetector, rmsFromSamples, spectrumBandsFromDb, type DetectorState } from "./lib/audio-change-detector";
 import { canonicalTrackKey, INITIAL_DISCOVERY_CAPTURE_MS, noMatchRetryDelay, RecognitionGate } from "./lib/recognition";
 import { planVinylHeartbeats } from "./lib/vinyl-heartbeats";
-import { isNearVinylBoundary, remainingTrackMs, shiftedBoundaryAfterPause } from "./lib/vinyl-mode";
+import { isNearVinylBoundary, remainingTrackMs, shiftedBoundaryAfterPause, timecodeAtCaptureMs } from "./lib/vinyl-mode";
 import { encodeMonoWav, prepareRecognitionAudio } from "./lib/wav";
 
 type Act = "ready" | "track" | "handoff" | "art" | "art-fade" | "gallery" | "return";
@@ -222,7 +222,7 @@ export default function Home() {
     vinylPreTransitionHeartbeatAtRef.current = plan.preTransitionAt;
   }
 
-  function anchorVinylSequence(result: Record<string, unknown>, recognizedTrack: Track, capturedAt: number) {
+  function anchorVinylSequence(result: Record<string, unknown>, recognizedTrack: Track, capturedAt: number, sampleDurationMs = 0) {
     if (listeningModeRef.current !== "vinyl" || !Array.isArray(result.albumSequence) || !result.albumSequence.length) return false;
     const tracks = result.albumSequence.filter((item): item is Track => Boolean(item && typeof item === "object" && "artist" in item && "title" in item && "album" in item));
     const suppliedIndex = typeof result.sequenceIndex === "number" ? result.sequenceIndex : -1;
@@ -235,11 +235,11 @@ export default function Home() {
       albumCover: recognizedTrack.albumCover ?? tracks[matchedIndex].albumCover,
     };
     vinylAlbumRef.current = { tracks, index: matchedIndex };
-    // AudD's timecode describes the captured audio; the song keeps playing
-    // while the request is travelling. Account for that elapsed time so the
-    // predicted handoff is not visibly late.
+    // AudD reports a position in the captured fragment. Advance from that
+    // rolling window to the moment the snapshot ended, then account for the
+    // request in flight; otherwise every predicted handoff is a clip late.
     const elapsedSinceCapture = Math.min(25_000, Math.max(0, Date.now() - capturedAt));
-    const anchoredTimecode = recognizedTrack.timecodeMs === undefined ? undefined : recognizedTrack.timecodeMs + elapsedSinceCapture;
+    const anchoredTimecode = timecodeAtCaptureMs(recognizedTrack.timecodeMs, sampleDurationMs, elapsedSinceCapture);
     tracks[matchedIndex].timecodeMs = anchoredTimecode;
     const remaining = remainingTrackMs(recognizedTrack.durationMs ?? tracks[matchedIndex].durationMs, anchoredTimecode);
     vinylBoundaryAtRef.current = remaining ? Date.now() + remaining : 0;
@@ -320,7 +320,7 @@ export default function Home() {
     nextFallbackReasonRef.current = delay < SAFETY_CHECK_MS ? "expected-ending" : "safety-check";
   }
 
-  async function identifyRecording(audio: Blob, capturedAt = Date.now(), reason?: RecognitionReason): Promise<RecognitionOutcome> {
+  async function identifyRecording(audio: Blob, capturedAt = Date.now(), reason?: RecognitionReason, sampleDurationMs = 0): Promise<RecognitionOutcome> {
     try {
       if (!reason || !isQuietTimingCheck(reason)) setStatus("Identifying the music…");
       setAuddCalls((count) => count + 1);
@@ -350,7 +350,7 @@ export default function Home() {
         discNumber: data.result.discNumber,
       };
       const key = trackKey(track);
-      const vinylAnchored = anchorVinylSequence(data.result as Record<string, unknown>, track, capturedAt);
+      const vinylAnchored = anchorVinylSequence(data.result as Record<string, unknown>, track, capturedAt, sampleDurationMs);
       if (!vinylAnchored) scheduleFallbackForTrack(track);
       if (key === lastTrackKeyRef.current) {
         if (vinylAnchored) preloadNextVinylArtwork();
@@ -419,7 +419,7 @@ export default function Home() {
     recorder.onstop = () => {
       recordingRef.current = false;
       if (!chunks.length) { recognitionGateRef.current.cancel(); return; }
-      void identifyRecording(new Blob(chunks, { type: recorder.mimeType || "audio/webm" }), Date.now(), reason).then((outcome) => finishRecognition(outcome, reason));
+      void identifyRecording(new Blob(chunks, { type: recorder.mimeType || "audio/webm" }), Date.now(), reason, SAMPLE_MS).then((outcome) => finishRecognition(outcome, reason));
     };
     recorder.start(); setStatus("Listening to confirm the song…");
     window.setTimeout(() => { if (recorder.state === "recording") recorder.stop(); }, SAMPLE_MS);
@@ -452,7 +452,7 @@ export default function Home() {
         lastSampleUrlRef.current = sampleUrl;
         setLastSampleUrl(sampleUrl);
       }
-      const outcome = await identifyRecording(audio, capturedAt, reason);
+      const outcome = await identifyRecording(audio, capturedAt, reason, (prepared.samples.length / snapshot.sampleRate) * 1000);
       finishRecognition(outcome, reason);
     } catch (error) {
       recognitionGateRef.current.finish(Date.now(), NO_MATCH_COOLDOWN_MS);
@@ -655,5 +655,5 @@ export default function Home() {
   if (act === "ready") return <main className="ready"><p className="eyebrow">Needle & Frame</p><h1>{hasLiveTrack ? "Listen again" : "Listen and identify"}</h1><p>{hasLiveTrack ? `Last identified: ${currentTrack.title} — ${currentTrack.artist}` : listeningMode === "vinyl" ? "Identify the record once, then let the album unfold." : "Identify a song, then discover a matching artwork."}</p>{modePicker}{curationPicker}{microphonePicker}{listenControl}<small>{status}</small>{transitionIndicator}{debugPanel}</main>;
   if (act === "track" || act === "handoff") return <main className={`track-screen${act === "handoff" ? " is-handing-off" : ""}`}>{act === "handoff" && <div className="handoff-art" aria-hidden="true"><img className="handoff-backdrop" src={art.image} alt="" /><img className="handoff-image" src={art.image} alt="" /></div>}<div className="frame" key={trackKey(currentTrack)}><section className="album-panel"><div className="album-mat"><div className={`album-cover${currentTrack.albumCover ? "" : " is-missing"}`} style={{ backgroundImage: currentTrack.albumCover ? `url(${currentTrack.albumCover})` : undefined }} role="img" aria-label={currentTrack.albumCover ? `${currentTrack.album} album artwork` : "Album artwork unavailable"}>{!currentTrack.albumCover && <span>{currentTrack.album.slice(0, 1)}</span>}</div></div></section><section className="now-playing"><p className="eyebrow now-label"><span />Now playing</p><h1 className={`artist-name${currentTrack.artist.length > 20 ? " is-long" : ""}`}>{currentTrack.artist}</h1><h2 className={`song-title${currentTrack.title.length > 26 ? " is-long" : ""}`}>{currentTrack.title}</h2><div className="album-details"><p className="field-label">From the album</p><p className="album-name"><em>{currentTrack.album}</em><span className="release-year"> · {currentTrack.year}</span></p></div><p className="curation-status">{status}</p></section></div>{modeBadge}{transitionIndicator}{debugPanel}</main>;
   if (act === "art" || act === "art-fade") return <main className={`art-intro${act === "art-fade" ? " is-info-fading" : ""}`} style={{ width: "min(100vw, calc(100vh * 16 / 9))", height: "min(100vh, calc(100vw * 9 / 16))", minHeight: 0, margin: "auto", aspectRatio: "16 / 9" }}><img className="art-image" style={{ position: "absolute", zIndex: 0, inset: "-3%", width: "106%", height: "106%", filter: "blur(26px) brightness(.38)", transform: "scale(1.06)" }} src={art.image} alt="" /><img className="art-image gallery-artwork" style={{ position: "absolute", zIndex: 1, inset: 0, objectFit: "cover" }} src={art.image} alt="" /><div className="art-overlay" style={{ zIndex: 2 }} /><section style={{ zIndex: 3 }}><p className="eyebrow">Selected artwork</p><h1 className={`art-title${art.title.length > 34 ? " is-long" : ""}`}><em>{art.title}</em></h1><h2>{art.artist}</h2><p>{art.date} · {art.museum}</p></section>{modeBadge}{transitionIndicator}{debugPanel}</main>;
-  return <main className={`gallery${act === "return" ? " is-returning" : ""}`} style={{ width: "min(100vw, calc(100vh * 16 / 9))", height: "min(100vh, calc(100vw * 9 / 16))", minHeight: 0, margin: "auto", aspectRatio: "16 / 9" }} onClick={() => setAct("ready")} aria-label={`${art.title} by ${art.artist}`}><img className="art-image" style={{ position: "absolute", zIndex: 0, inset: "-3%", width: "106%", height: "106%", filter: "blur(26px) brightness(.38)", transform: "scale(1.06)" }} src={art.image} alt="" /><img className="art-image gallery-artwork" style={{ position: "absolute", zIndex: 1, inset: 0, objectFit: "cover" }} src={art.image} alt={`${art.title} by ${art.artist}`} />{modeBadge}{transitionIndicator}{debugPanel}</main>;
+  return <main className={`gallery${act === "return" ? " is-returning" : ""}`} style={{ width: "min(100vw, calc(100vh * 16 / 9))", height: "min(100vh, calc(100vw * 9 / 16))", minHeight: 0, margin: "auto", aspectRatio: "16 / 9" }} onClick={() => setAct("ready")} aria-label={`${art.title} by ${art.artist}`}><img className="art-image" style={{ position: "absolute", zIndex: 0, inset: "-3%", width: "106%", height: "106%", filter: "blur(26px) brightness(.38)", transform: "scale(1.06)" }} src={art.image} alt="" /><img className="art-image gallery-artwork" style={{ position: "absolute", zIndex: 1, inset: 0, objectFit: "cover" }} src={art.image} alt={`${art.title} by ${art.artist}`} /><div className="gallery-overlay" aria-hidden="true" />{modeBadge}{transitionIndicator}{debugPanel}</main>;
 }

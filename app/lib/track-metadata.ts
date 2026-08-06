@@ -33,10 +33,11 @@ function normalizeRecordingTitle(value: string | undefined) {
     .replace(/\b(?:album version|album mix|original album version)\b$/gi, " "));
 }
 
-/** Prefer an original-looking exact recording over compilations and DJ mixes. */
-export function selectCatalogTrack(artist: string, title: string, tracks: CatalogTrack[]) {
+/** Prefer an original-looking exact recording over compilations, DJ mixes, and single-only releases. */
+export function selectCatalogTrack(artist: string, title: string, tracks: CatalogTrack[], preferredAlbum?: string) {
   const wantedArtist = normalize(artist);
   const wantedTitle = normalizeRecordingTitle(title);
+  const wantedAlbum = normalize(preferredAlbum);
   let best: { track: CatalogTrack; score: number } | undefined;
 
   for (const track of tracks) {
@@ -49,7 +50,13 @@ export function selectCatalogTrack(artist: string, title: string, tracks: Catalo
     const titleScore = candidateTitle === wantedTitle ? 80 : 0;
     if (!artistScore || !titleScore) continue;
     const compilationPenalty = COMPILATION_TERMS.test(track.collectionName ?? "") ? 45 : 0;
-    const score = artistScore + titleScore - compilationPenalty;
+    // AudD/Apple can point to a same-title single even when the recognized song belongs
+    // to an album. Prefer an explicitly matching album and, absent that, an album release
+    // with a real track list. This makes Vinyl Mode useful without changing live matching.
+    const preferredAlbumBonus = wantedAlbum && normalize(track.collectionName) === wantedAlbum ? 80 : 0;
+    const albumLengthBonus = Math.min(12, Math.max(0, (track.trackCount ?? 1) - 1));
+    const singlePenalty = track.trackCount === 1 ? 24 : 0;
+    const score = artistScore + titleScore + preferredAlbumBonus + albumLengthBonus - compilationPenalty - singlePenalty;
     if (!best || score > best.score) best = { track, score };
   }
 
