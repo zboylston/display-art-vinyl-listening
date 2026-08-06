@@ -1,0 +1,15 @@
+# Local copyrighted test captures are never committed.
+evals/local-audio/
+
+# Environment secrets stay local.
+.env
+.env.local
+.env.*.local
+
+# Local build and editor state.
+node_modules/
+.next/
+dist/
+.pnpm-store/
+*.tsbuildinfo
+.DS_Store
