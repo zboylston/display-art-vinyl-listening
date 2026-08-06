@@ -6,7 +6,7 @@ import { canonicalTrackKey, INITIAL_DISCOVERY_CAPTURE_MS, noMatchRetryDelay, Rec
 import { isNearVinylBoundary, remainingTrackMs, shiftedBoundaryAfterPause } from "./lib/vinyl-mode";
 import { encodeMonoWav, prepareRecognitionAudio } from "./lib/wav";
 
-type Act = "ready" | "track" | "handoff" | "art" | "art-fade" | "gallery";
+type Act = "ready" | "track" | "handoff" | "art" | "art-fade" | "gallery" | "return";
 type ListeningMode = "live" | "vinyl";
 type AudioInput = { deviceId: string; label: string };
 type Artwork = { title: string; artist: string; date: string; museum: string; image: string; rationale: string };
@@ -33,6 +33,7 @@ const TRACK_INFO_MS = 10000;
 const INFO_TO_ART_DISSOLVE_MS = 6500;
 const ART_INFO_HOLD_MS = 9000;
 const ART_INFO_FADE_MS = 3500;
+const ART_TO_TRACK_DISSOLVE_MS = 3200;
 const CURATION_CACHE_VERSION = "v5-comparative-curation";
 const VINYL_TIMER_VERIFY_MS = 12_000;
 
@@ -66,6 +67,7 @@ export default function Home() {
   const [lastSampleUrl, setLastSampleUrl] = useState<string | null>(null);
   const [recognitionPhase, setRecognitionPhase] = useState<RecognitionPhase>("idle");
   const currentTrackRef = useRef(currentTrack);
+  const actRef = useRef<Act>("ready");
   const listeningModeRef = useRef<ListeningMode>("live");
   const artCurationEnabledRef = useRef(true);
   const streamRef = useRef<MediaStream | null>(null);
@@ -103,6 +105,7 @@ export default function Home() {
   const hasLiveTrack = currentTrack !== fixtureTrack;
 
   useEffect(() => { currentTrackRef.current = currentTrack; }, [currentTrack]);
+  useEffect(() => { actRef.current = act; }, [act]);
   useEffect(() => { setShowAudioDebug(new URLSearchParams(window.location.search).get("debugAudio") === "1"); }, []);
   useEffect(() => {
     if (act === "art") { const timer = window.setTimeout(() => setAct("art-fade"), ART_INFO_HOLD_MS); return () => window.clearTimeout(timer); }
@@ -151,6 +154,14 @@ export default function Home() {
 
   async function presentTrack(track: Track, preparedArtwork?: Artwork) {
     const presentationId = ++presentationIdRef.current;
+    const isLeavingArtwork = actRef.current === "art" || actRef.current === "art-fade" || actRef.current === "gallery";
+    if (isLeavingArtwork) {
+      // Let the previous work resolve into the warm album screen rather than
+      // abruptly replacing a finished gallery view with new metadata.
+      setAct("return");
+      await new Promise<void>((resolve) => window.setTimeout(resolve, ART_TO_TRACK_DISSOLVE_MS));
+      if (presentationId !== presentationIdRef.current) return;
+    }
     const trackScreenStartedAt = Date.now();
     const key = trackKey(track);
     setCurrentTrack(track); setAct("track");
@@ -185,11 +196,14 @@ export default function Home() {
     const album = vinylAlbumRef.current;
     if (!album) { setVinylQueueLabel(""); return; }
     const current = album.tracks[album.index];
-    const next = album.tracks[album.index + 1];
-    setVinylQueueLabel(`Track ${album.index + 1} of ${album.tracks.length}${current?.discNumber ? ` · disc ${current.discNumber}` : ""}${next ? ` · next: ${next.title}` : " · album ending"}`);
+    const trackNumber = String(album.index + 1).padStart(2, "0");
+    const totalTracks = String(album.tracks.length).padStart(2, "0");
+    const sideNumber = current?.discNumber ?? 0;
+    const sideLabel = sideNumber > 0 && sideNumber <= 26 ? `Side ${String.fromCharCode(64 + sideNumber)} · ` : "";
+    setVinylQueueLabel(`${sideLabel}${trackNumber} / ${totalTracks}`);
   }
 
-  function anchorVinylSequence(result: Record<string, unknown>, recognizedTrack: Track) {
+  function anchorVinylSequence(result: Record<string, unknown>, recognizedTrack: Track, capturedAt: number) {
     if (listeningModeRef.current !== "vinyl" || !Array.isArray(result.albumSequence) || !result.albumSequence.length) return false;
     const tracks = result.albumSequence.filter((item): item is Track => Boolean(item && typeof item === "object" && "artist" in item && "title" in item && "album" in item));
     const suppliedIndex = typeof result.sequenceIndex === "number" ? result.sequenceIndex : -1;
@@ -202,7 +216,13 @@ export default function Home() {
       albumCover: recognizedTrack.albumCover ?? tracks[matchedIndex].albumCover,
     };
     vinylAlbumRef.current = { tracks, index: matchedIndex };
-    const remaining = remainingTrackMs(recognizedTrack.durationMs ?? tracks[matchedIndex].durationMs, recognizedTrack.timecodeMs);
+    // AudD's timecode describes the captured audio; the song keeps playing
+    // while the request is travelling. Account for that elapsed time so the
+    // predicted handoff is not visibly late.
+    const elapsedSinceCapture = Math.min(25_000, Math.max(0, Date.now() - capturedAt));
+    const anchoredTimecode = recognizedTrack.timecodeMs === undefined ? undefined : recognizedTrack.timecodeMs + elapsedSinceCapture;
+    tracks[matchedIndex].timecodeMs = anchoredTimecode;
+    const remaining = remainingTrackMs(recognizedTrack.durationMs ?? tracks[matchedIndex].durationMs, anchoredTimecode);
     vinylBoundaryAtRef.current = remaining ? Date.now() + remaining : 0;
     vinylPauseAtRef.current = 0;
     vinylGapPendingRef.current = false;
@@ -275,7 +295,7 @@ export default function Home() {
     nextFallbackReasonRef.current = delay < SAFETY_CHECK_MS ? "expected-ending" : "safety-check";
   }
 
-  async function identifyRecording(audio: Blob): Promise<RecognitionOutcome> {
+  async function identifyRecording(audio: Blob, capturedAt = Date.now()): Promise<RecognitionOutcome> {
     try {
       setStatus("Identifying the music…");
       setAuddCalls((count) => count + 1);
@@ -305,11 +325,14 @@ export default function Home() {
         discNumber: data.result.discNumber,
       };
       const key = trackKey(track);
-      const vinylAnchored = anchorVinylSequence(data.result as Record<string, unknown>, track);
+      const vinylAnchored = anchorVinylSequence(data.result as Record<string, unknown>, track, capturedAt);
       if (!vinylAnchored) scheduleFallbackForTrack(track);
       if (key === lastTrackKeyRef.current) {
         if (vinylAnchored) preloadNextVinylArtwork();
-        setStatus("Still listening…"); return "same";
+        // A repeat identification is useful for the timing model but should
+        // not interrupt the artwork experience with technical narration.
+        if (!vinylAnchored) setStatus("Still listening…");
+        return "same";
       }
       lastTrackKeyRef.current = key;
       if (vinylAnchored) preloadNextVinylArtwork();
@@ -350,7 +373,12 @@ export default function Home() {
     } else consecutiveNoMatchRef.current = 0;
     setAudioDebug((debug) => ({ ...debug, reason: `${reason}:${outcome}` }));
     if (phaseTimerRef.current) window.clearTimeout(phaseTimerRef.current);
-    if (outcome === "match") {
+    if (outcome === "match" && listeningModeRef.current === "vinyl" && vinylAlbumRef.current) {
+      // Once a record has been identified, Vinyl Mode should feel settled.
+      // The microphone remains available for the next predicted boundary, but
+      // we deliberately hide the active-listening phase during presentation.
+      changeRecognitionPhase("idle");
+    } else if (outcome === "match") {
       changeRecognitionPhase("matched");
       phaseTimerRef.current = window.setTimeout(() => changeRecognitionPhase("listening"), 2_800);
     } else changeRecognitionPhase("listening");
@@ -366,7 +394,7 @@ export default function Home() {
     recorder.onstop = () => {
       recordingRef.current = false;
       if (!chunks.length) { recognitionGateRef.current.cancel(); return; }
-      void identifyRecording(new Blob(chunks, { type: recorder.mimeType || "audio/webm" })).then((outcome) => finishRecognition(outcome, reason));
+      void identifyRecording(new Blob(chunks, { type: recorder.mimeType || "audio/webm" }), Date.now()).then((outcome) => finishRecognition(outcome, reason));
     };
     recorder.start(); setStatus("Listening to confirm the song…");
     window.setTimeout(() => { if (recorder.state === "recording") recorder.stop(); }, SAMPLE_MS);
@@ -387,6 +415,7 @@ export default function Home() {
       const discoveryRetry = listeningModeRef.current === "vinyl" && !lastTrackKeyRef.current && consecutiveNoMatchRef.current > 0;
       const discoveryRetrySeconds = discoveryRetry ? 24 : SNAPSHOT_SECONDS;
       const snapshot = await takeRingSnapshot(reason === "music-resumed" ? 5 : discoveryRetrySeconds);
+      const capturedAt = Date.now();
       if (snapshot.samples.length < snapshot.sampleRate * 4) throw new Error("Waiting for a longer music sample.");
       const prepared = prepareRecognitionAudio(snapshot.samples, snapshot.sampleRate, discoveryRetry);
       const audio = encodeMonoWav(prepared.samples, snapshot.sampleRate);
@@ -397,7 +426,7 @@ export default function Home() {
         lastSampleUrlRef.current = sampleUrl;
         setLastSampleUrl(sampleUrl);
       }
-      const outcome = await identifyRecording(audio);
+      const outcome = await identifyRecording(audio, capturedAt);
       finishRecognition(outcome, reason);
     } catch (error) {
       recognitionGateRef.current.finish(Date.now(), NO_MATCH_COOLDOWN_MS);
@@ -563,7 +592,6 @@ export default function Home() {
       : "Artwork curation is off — Vinyl Mode will show track and album information only.");
   }
 
-  async function play() { setCurrentTrack(fixtureTrack); try { await presentTrack(fixtureTrack); } catch (error) { setStatus(error instanceof Error ? error.message : "Artwork selection is unavailable."); } }
   const listenControl = <button className="listen-control" onClick={isListening ? stopListenMode : startListenMode}>{isListening ? "Pause listening" : listeningMode === "vinyl" ? "Start vinyl mode" : "Start live mode"}</button>;
   const microphonePicker = <label className="microphone-picker"><span>Microphone</span><select value={selectedDeviceId} onChange={(event) => setSelectedDeviceId(event.target.value)} disabled={isListening}><option value="">System default</option>{audioInputs.map((input) => <option key={input.deviceId} value={input.deviceId}>{input.label}</option>)}</select></label>;
   const modePicker = <div className="mode-picker" role="group" aria-label="Listening mode"><button type="button" className={listeningMode === "live" ? "is-active" : ""} onClick={() => chooseListeningMode("live")} disabled={isListening}><strong>Live</strong><span>Follow anything you play</span></button><button type="button" className={listeningMode === "vinyl" ? "is-active" : ""} onClick={() => chooseListeningMode("vinyl")} disabled={isListening}><strong>Vinyl</strong><span>Predict the album sequence</span></button></div>;
@@ -575,8 +603,8 @@ export default function Home() {
   const vinylSequenceIsActive = listeningMode === "vinyl" && Boolean(vinylAlbumRef.current);
   const transitionIndicator = !vinylSequenceIsActive && (recognitionPhase === "suspected" || recognitionPhase === "checking" || recognitionPhase === "matched") ? <aside className="transition-indicator" data-phase={recognitionPhase} aria-live="polite"><span className="signal-bars" aria-hidden="true"><i /><i /><i /><i /></span><span><small>{recognitionPhase === "suspected" ? "Listening closely" : recognitionPhase === "checking" ? "Checking the sound" : "Now playing"}</small><strong>{transitionLabel}</strong></span></aside> : null;
 
-  if (act === "ready") return <main className="ready"><p className="eyebrow">Music Art</p><h1>{hasLiveTrack ? "Listen again" : "Listen and identify"}</h1><p>{hasLiveTrack ? `Last identified: ${currentTrack.title} — ${currentTrack.artist}` : listeningMode === "vinyl" ? "Identify the record once, then let the album unfold." : "Identify a song, then discover a matching artwork."}</p>{modePicker}{curationPicker}{microphonePicker}{listenControl}<button onClick={play}>Replay Pink Moon fixture</button><small>{status}</small>{transitionIndicator}{debugPanel}</main>;
+  if (act === "ready") return <main className="ready"><p className="eyebrow">Needle & Frame</p><h1>{hasLiveTrack ? "Listen again" : "Listen and identify"}</h1><p>{hasLiveTrack ? `Last identified: ${currentTrack.title} — ${currentTrack.artist}` : listeningMode === "vinyl" ? "Identify the record once, then let the album unfold." : "Identify a song, then discover a matching artwork."}</p>{modePicker}{curationPicker}{microphonePicker}{listenControl}<small>{status}</small>{transitionIndicator}{debugPanel}</main>;
   if (act === "track" || act === "handoff") return <main className={`track-screen${act === "handoff" ? " is-handing-off" : ""}`}>{act === "handoff" && <div className="handoff-art" aria-hidden="true"><img className="handoff-backdrop" src={art.image} alt="" /><img className="handoff-image" src={art.image} alt="" /></div>}<div className="frame" key={trackKey(currentTrack)}><section className="album-panel"><div className="album-mat"><div className={`album-cover${currentTrack.albumCover ? "" : " is-missing"}`} style={{ backgroundImage: currentTrack.albumCover ? `url(${currentTrack.albumCover})` : undefined }} role="img" aria-label={currentTrack.albumCover ? `${currentTrack.album} album artwork` : "Album artwork unavailable"}>{!currentTrack.albumCover && <span>{currentTrack.album.slice(0, 1)}</span>}</div></div></section><section className="now-playing"><p className="eyebrow now-label"><span />Now playing</p><h1 className={`artist-name${currentTrack.artist.length > 20 ? " is-long" : ""}`}>{currentTrack.artist}</h1><h2 className={`song-title${currentTrack.title.length > 26 ? " is-long" : ""}`}>{currentTrack.title}</h2><div className="album-details"><p className="field-label">From the album</p><p className="album-name"><em>{currentTrack.album}</em><span className="release-year"> · {currentTrack.year}</span></p></div><p className="curation-status">{status}</p></section></div>{modeBadge}{transitionIndicator}{debugPanel}</main>;
-  if (act === "art" || act === "art-fade") return <main className={`art-intro${act === "art-fade" ? " is-info-fading" : ""}`} style={{ width: "min(100vw, calc(100vh * 16 / 9))", height: "min(100vh, calc(100vw * 9 / 16))", minHeight: 0, margin: "auto", aspectRatio: "16 / 9" }}><img className="art-image" style={{ position: "absolute", zIndex: 0, inset: "-3%", width: "106%", height: "106%", filter: "blur(26px) brightness(.38)", transform: "scale(1.06)" }} src={art.image} alt="" /><img className="art-image" style={{ position: "absolute", zIndex: 1, inset: 0, objectFit: "contain" }} src={art.image} alt="" /><div className="art-overlay" style={{ zIndex: 2 }} /><section style={{ zIndex: 3 }}><p className="eyebrow">Selected artwork</p><h1 className={`art-title${art.title.length > 34 ? " is-long" : ""}`}><em>{art.title}</em></h1><h2>{art.artist}</h2><p>{art.date} · {art.museum}</p></section>{modeBadge}{transitionIndicator}{debugPanel}</main>;
-  return <main className="gallery" style={{ width: "min(100vw, calc(100vh * 16 / 9))", height: "min(100vh, calc(100vw * 9 / 16))", minHeight: 0, margin: "auto", aspectRatio: "16 / 9" }} onClick={() => setAct("ready")} aria-label={`${art.title} by ${art.artist}`}><img className="art-image" style={{ position: "absolute", zIndex: 0, inset: "-3%", width: "106%", height: "106%", filter: "blur(26px) brightness(.38)", transform: "scale(1.06)" }} src={art.image} alt="" /><img className="art-image" style={{ position: "absolute", zIndex: 1, inset: 0, objectFit: "contain" }} src={art.image} alt={`${art.title} by ${art.artist}`} />{modeBadge}{transitionIndicator}{debugPanel}</main>;
+  if (act === "art" || act === "art-fade") return <main className={`art-intro${act === "art-fade" ? " is-info-fading" : ""}`} style={{ width: "min(100vw, calc(100vh * 16 / 9))", height: "min(100vh, calc(100vw * 9 / 16))", minHeight: 0, margin: "auto", aspectRatio: "16 / 9" }}><img className="art-image" style={{ position: "absolute", zIndex: 0, inset: "-3%", width: "106%", height: "106%", filter: "blur(26px) brightness(.38)", transform: "scale(1.06)" }} src={art.image} alt="" /><img className="art-image gallery-artwork" style={{ position: "absolute", zIndex: 1, inset: 0, objectFit: "cover" }} src={art.image} alt="" /><div className="art-overlay" style={{ zIndex: 2 }} /><section style={{ zIndex: 3 }}><p className="eyebrow">Selected artwork</p><h1 className={`art-title${art.title.length > 34 ? " is-long" : ""}`}><em>{art.title}</em></h1><h2>{art.artist}</h2><p>{art.date} · {art.museum}</p></section>{modeBadge}{transitionIndicator}{debugPanel}</main>;
+  return <main className={`gallery${act === "return" ? " is-returning" : ""}`} style={{ width: "min(100vw, calc(100vh * 16 / 9))", height: "min(100vh, calc(100vw * 9 / 16))", minHeight: 0, margin: "auto", aspectRatio: "16 / 9" }} onClick={() => setAct("ready")} aria-label={`${art.title} by ${art.artist}`}><img className="art-image" style={{ position: "absolute", zIndex: 0, inset: "-3%", width: "106%", height: "106%", filter: "blur(26px) brightness(.38)", transform: "scale(1.06)" }} src={art.image} alt="" /><img className="art-image gallery-artwork" style={{ position: "absolute", zIndex: 1, inset: 0, objectFit: "cover" }} src={art.image} alt={`${art.title} by ${art.artist}`} />{modeBadge}{transitionIndicator}{debugPanel}</main>;
 }
