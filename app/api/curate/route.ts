@@ -1,6 +1,7 @@
 import OpenAI from "openai";
 import { NextResponse } from "next/server";
 import { balanceBySource, MIN_LANDSCAPE_RATIO, orientationPoolForCurator } from "../../lib/art-orientation";
+import { excludeRecentCandidates, parseRecentArtworkIds } from "../../lib/recent-artwork";
 import {
   cleanTrackPayload,
   normalizeBrief,
@@ -465,9 +466,10 @@ async function chooseCandidate(client: OpenAI, track: CleanTrack, brief: VisualB
 export async function POST(request: Request) {
   try {
     if (!process.env.OPENAI_API_KEY) return NextResponse.json({ error: "OpenAI is not configured." }, { status: 503 });
-    const payload = await request.json().catch(() => ({})) as { track?: Track };
+    const payload = await request.json().catch(() => ({})) as { track?: Track; excludeArtworkIds?: unknown };
     const track = cleanTrackPayload(payload.track ?? {});
     if (!track) return NextResponse.json({ error: "A recognized artist and title are required for curation." }, { status: 400 });
+    const excludeArtworkIds = parseRecentArtworkIds(payload.excludeArtworkIds);
 
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
     const brief = await createBrief(client, track);
@@ -475,6 +477,7 @@ export async function POST(request: Request) {
       track: `${track.artist} — ${track.title}`,
       confidence: brief.confidence,
       genre: track.genre ?? null,
+      exclude: excludeArtworkIds.length,
       terms: brief.museum_search_terms,
     }));
     const safeTerms = <T,>(search: (term: string) => Promise<T[]>) => Promise.all(
@@ -498,7 +501,8 @@ export async function POST(request: Request) {
     const withImages = (await Promise.all(probePool.map(withDisplayableImage)))
       .filter((candidate): candidate is Candidate => candidate !== null);
     const orientationPool = orientationPoolForCurator(withImages);
-    const selectionPool = balanceBySource(orientationPool, MAX_CURATOR_IMAGE_FETCH);
+    const withoutRecent = excludeRecentCandidates(orientationPool, excludeArtworkIds);
+    const selectionPool = balanceBySource(withoutRecent, MAX_CURATOR_IMAGE_FETCH);
     const curatorReady = (await Promise.all(selectionPool.map(withCuratorImage)))
       .filter((candidate): candidate is CuratorCandidate => candidate !== null);
     const curatorPool = balanceBySource(curatorReady, MAX_VISUAL_CANDIDATES);
@@ -513,9 +517,11 @@ export async function POST(request: Request) {
       probed: sourceCounts(probePool),
       displayable: sourceCounts(withImages),
       landscape: sourceCounts(withImages.filter((candidate) => (candidate.aspectRatio ?? 0) >= MIN_LANDSCAPE_RATIO)),
+      afterExclude: sourceCounts(withoutRecent),
       selectionPool: sourceCounts(selectionPool),
       curatorReady: sourceCounts(curatorReady),
       visualPool: sourceCounts(curatorPool),
+      excluded: excludeArtworkIds.length,
     }));
     if (!curatorPool.length) return NextResponse.json({ error: "No verified paintings, drawings, prints, or photographs matched this visual brief." }, { status: 502 });
 
