@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { AudioChangeDetector, rmsFromSamples, spectrumBandsFromDb, type DetectorState } from "./lib/audio-change-detector";
 import { canonicalTrackKey, INITIAL_DISCOVERY_CAPTURE_MS, noMatchRetryDelay, RecognitionGate, textTrackKey } from "./lib/recognition";
+import { parseRecentArtworkIds, pushRecentArtworkId, shouldRefreshCachedArtwork } from "./lib/recent-artwork";
 import { planVinylHeartbeats } from "./lib/vinyl-heartbeats";
 import { isNearVinylBoundary, refinedVinylBoundaryAt, remainingTrackMs, shiftedBoundaryAfterPause, timecodeAtCaptureMs } from "./lib/vinyl-mode";
 import { vinylFolioCopy, type VinylProgress } from "./lib/vinyl-folio";
@@ -11,7 +12,7 @@ import { encodeMonoWav, prepareRecognitionAudio } from "./lib/wav";
 type Act = "ready" | "track" | "handoff" | "art" | "art-fade" | "gallery" | "return";
 type ListeningMode = "live" | "vinyl";
 type AudioInput = { deviceId: string; label: string };
-type Artwork = { title: string; artist: string; date: string; museum: string; image: string; rationale: string; brief?: unknown };
+type Artwork = { id?: string; title: string; artist: string; date: string; museum: string; image: string; rationale: string; brief?: unknown };
 type Track = { artist: string; title: string; album: string; year: string; albumCover?: string; isrc?: string; durationMs?: number; timecodeMs?: number; collectionId?: number; trackNumber?: number; discNumber?: number; genre?: string };
 type RecognitionReason = "music-started" | "music-resumed" | "spectral-change" | "expected-ending" | "safety-check" | "heartbeat" | "pre-transition" | "transition-confirmation" | "legacy-fallback";
 type RingSnapshot = { samples: Float32Array; sampleRate: number };
@@ -36,7 +37,8 @@ const INFO_TO_ART_DISSOLVE_MS = 6500;
 const ART_INFO_HOLD_MS = 9000;
 const ART_INFO_FADE_MS = 3500;
 const ART_TO_TRACK_DISSOLVE_MS = 4400;
-const CURATION_CACHE_VERSION = "v6-dossier-curation";
+const CURATION_CACHE_VERSION = "v7-recent-art-diversity";
+const RECENT_ARTWORK_STORAGE_KEY = `music-art:recent-artwork:${CURATION_CACHE_VERSION}`;
 const VINYL_TIMER_VERIFY_MS = 12_000;
 const EARLY_TRANSITION_CONFIRM_DELAY_MS = 5_000;
 /** Brief dropouts should only shift the boundary; longer pauses may mean a skip. */
@@ -174,6 +176,29 @@ export default function Home() {
   function readCachedArtwork(key: string): Artwork | null { try { const value = localStorage.getItem(`music-art:artwork:${CURATION_CACHE_VERSION}:${key}`); return value ? JSON.parse(value) as Artwork : null; } catch { return null; } }
   function cacheArtwork(key: string, artwork: Artwork) { try { localStorage.setItem(`music-art:artwork:${CURATION_CACHE_VERSION}:${key}`, JSON.stringify(artwork)); } catch { /* Cache is optional. */ } }
 
+  function readRecentArtworkIds(): string[] {
+    try {
+      return parseRecentArtworkIds(JSON.parse(localStorage.getItem(RECENT_ARTWORK_STORAGE_KEY) ?? "[]"));
+    } catch {
+      return [];
+    }
+  }
+
+  function rememberArtwork(artwork: Artwork) {
+    if (!artwork.id) return;
+    try {
+      const next = pushRecentArtworkId(readRecentArtworkIds(), artwork.id);
+      localStorage.setItem(RECENT_ARTWORK_STORAGE_KEY, JSON.stringify(next));
+    } catch { /* History is optional. */ }
+  }
+
+  function resolveArtworkCache(key: string): Artwork | null {
+    const cached = readCachedArtwork(key);
+    if (!cached) return null;
+    if (shouldRefreshCachedArtwork(cached.id, readRecentArtworkIds())) return null;
+    return cached;
+  }
+
   async function fetchArtwork(track: Track, announce = true): Promise<Artwork> {
     if (announce) setStatus("Curating an artwork for this song…");
     const curateTrack = {
@@ -183,13 +208,19 @@ export default function Home() {
       year: track.year,
       ...(track.genre ? { genre: track.genre } : {}),
     };
-    const response = await fetch("/api/curate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ track: curateTrack }), signal: AbortSignal.timeout(150000) });
+    const response = await fetch("/api/curate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ track: curateTrack, excludeArtworkIds: readRecentArtworkIds() }),
+      signal: AbortSignal.timeout(150000),
+    });
     const artwork = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(artwork.error ?? "Artwork selection is unavailable.");
     if (announce) setStatus("Selecting a work from the collection…");
     const image = `/api/art-image?source=${encodeURIComponent(artwork.image)}`;
     const preload = new Image(); preload.src = image; await preload.decode();
     return {
+      ...(typeof artwork.id === "string" ? { id: artwork.id } : {}),
       title: artwork.title,
       artist: artwork.artist,
       date: artwork.date,
@@ -217,11 +248,16 @@ export default function Home() {
       setStatus(listeningModeRef.current === "vinyl" ? "Vinyl sequence is active — music information only." : "Music information only.");
       return;
     }
-    const cached = readCachedArtwork(key);
-    const artwork = preparedArtwork ?? cached ?? await fetchArtwork(track);
+    const cached = resolveArtworkCache(key);
+    const prepared = preparedArtwork && !shouldRefreshCachedArtwork(preparedArtwork.id, readRecentArtworkIds())
+      ? preparedArtwork
+      : undefined;
+    const artwork = prepared ?? cached ?? await fetchArtwork(track);
     if (presentationId !== presentationIdRef.current) return;
-    if (!cached && !preparedArtwork) cacheArtwork(key, artwork);
+    cacheArtwork(key, artwork);
+    rememberArtwork(artwork);
     setArt(artwork); setStatus("Artwork selected");
+    preloadNextVinylArtwork();
     const remainingTrackTime = Math.max(0, TRACK_INFO_MS - (Date.now() - trackScreenStartedAt));
     window.setTimeout(() => {
       if (presentationId !== presentationIdRef.current) return;
@@ -313,7 +349,7 @@ export default function Home() {
     if (!next) { vinylPreloadRef.current = null; return; }
     const key = artworkCacheKey(next);
     if (vinylPreloadRef.current?.key === key) return;
-    const cached = readCachedArtwork(key);
+    const cached = resolveArtworkCache(key);
     const promise = cached ? Promise.resolve(cached) : fetchArtwork(next, false).then((artwork) => {
       cacheArtwork(key, artwork);
       return artwork;
@@ -360,7 +396,6 @@ export default function Home() {
       const prepared = preload ? await preload.catch(() => undefined) : undefined;
       vinylPreloadRef.current = null;
       await presentTrack(next, prepared);
-      preloadNextVinylArtwork();
       return true;
     } finally {
       vinylAdvanceInFlightRef.current = false;
@@ -420,7 +455,6 @@ export default function Home() {
       const vinylAnchored = anchorVinylSequence(data.result as Record<string, unknown>, track, capturedAt, sampleDurationMs);
       if (!vinylAnchored) scheduleFallbackForTrack(track);
       lastTrackKeyRef.current = key;
-      if (vinylAnchored) preloadNextVinylArtwork();
       const presentation = presentTrack(track);
       void presentation.catch((error) => setStatus(error instanceof Error ? error.message : "Artwork selection is unavailable."));
       return "match";
