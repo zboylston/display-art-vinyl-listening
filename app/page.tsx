@@ -5,6 +5,7 @@ import { AudioChangeDetector, rmsFromSamples, spectrumBandsFromDb, type Detector
 import { canonicalTrackKey, INITIAL_DISCOVERY_CAPTURE_MS, noMatchRetryDelay, RecognitionGate } from "./lib/recognition";
 import { planVinylHeartbeats } from "./lib/vinyl-heartbeats";
 import { isNearVinylBoundary, remainingTrackMs, shiftedBoundaryAfterPause, timecodeAtCaptureMs } from "./lib/vinyl-mode";
+import { vinylFolioCopy, type VinylProgress } from "./lib/vinyl-folio";
 import { encodeMonoWav, prepareRecognitionAudio } from "./lib/wav";
 
 type Act = "ready" | "track" | "handoff" | "art" | "art-fade" | "gallery" | "return";
@@ -34,7 +35,7 @@ const TRACK_INFO_MS = 10000;
 const INFO_TO_ART_DISSOLVE_MS = 6500;
 const ART_INFO_HOLD_MS = 9000;
 const ART_INFO_FADE_MS = 3500;
-const ART_TO_TRACK_DISSOLVE_MS = 3200;
+const ART_TO_TRACK_DISSOLVE_MS = 4400;
 const CURATION_CACHE_VERSION = "v5-comparative-curation";
 const VINYL_TIMER_VERIFY_MS = 12_000;
 const EARLY_TRANSITION_CONFIRM_DELAY_MS = 5_000;
@@ -59,7 +60,7 @@ export default function Home() {
   const [currentTrack, setCurrentTrack] = useState<Track>(fixtureTrack);
   const [listeningMode, setListeningMode] = useState<ListeningMode>("live");
   const [artCurationEnabled, setArtCurationEnabled] = useState(true);
-  const [vinylQueueLabel, setVinylQueueLabel] = useState("");
+  const [vinylProgress, setVinylProgress] = useState<VinylProgress | null>(null);
   const [audioInputs, setAudioInputs] = useState<AudioInput[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState("");
   const [activeMicrophone, setActiveMicrophone] = useState("");
@@ -202,18 +203,14 @@ export default function Home() {
     vinylPreTransitionHeartbeatAtRef.current = 0;
     if (vinylEarlyConfirmationTimerRef.current) window.clearTimeout(vinylEarlyConfirmationTimerRef.current);
     vinylEarlyConfirmationTimerRef.current = null;
-    setVinylQueueLabel("");
+    setVinylProgress(null);
   }
 
-  function updateVinylQueueLabel() {
+  function updateVinylProgress() {
     const album = vinylAlbumRef.current;
-    if (!album) { setVinylQueueLabel(""); return; }
+    if (!album) { setVinylProgress(null); return; }
     const current = album.tracks[album.index];
-    const trackNumber = String(album.index + 1).padStart(2, "0");
-    const totalTracks = String(album.tracks.length).padStart(2, "0");
-    const sideNumber = current?.discNumber ?? 0;
-    const sideLabel = sideNumber > 0 && sideNumber <= 26 ? `Side ${String.fromCharCode(64 + sideNumber)} · ` : "";
-    setVinylQueueLabel(`${sideLabel}${trackNumber} / ${totalTracks}`);
+    setVinylProgress({ discNumber: current?.discNumber, trackIndex: album.index, totalTracks: album.tracks.length });
   }
 
   function scheduleVinylHeartbeats() {
@@ -247,7 +244,7 @@ export default function Home() {
     vinylGapPendingRef.current = false;
     nextFallbackAtRef.current = 0;
     scheduleVinylHeartbeats();
-    updateVinylQueueLabel();
+    updateVinylProgress();
     return true;
   }
 
@@ -278,7 +275,7 @@ export default function Home() {
       vinylBoundaryAtRef.current = 0;
       vinylMidpointHeartbeatAtRef.current = 0;
       vinylPreTransitionHeartbeatAtRef.current = 0;
-      setVinylQueueLabel("Album complete · waiting for another record");
+      setVinylProgress(null);
       setStatus("The album sequence is complete — listening for the next record.");
       return false;
     }
@@ -292,7 +289,7 @@ export default function Home() {
     vinylEarlyConfirmationTimerRef.current = null;
     scheduleVinylHeartbeats();
     lastTrackKeyRef.current = trackKey(next);
-    updateVinylQueueLabel();
+    updateVinylProgress();
     changeRecognitionPhase("matched");
     if (phaseTimerRef.current) window.clearTimeout(phaseTimerRef.current);
     phaseTimerRef.current = window.setTimeout(() => changeRecognitionPhase("listening"), 2_800);
@@ -643,7 +640,8 @@ export default function Home() {
   const microphonePicker = <label className="microphone-picker"><span>Microphone</span><select value={selectedDeviceId} onChange={(event) => setSelectedDeviceId(event.target.value)} disabled={isListening}><option value="">System default</option>{audioInputs.map((input) => <option key={input.deviceId} value={input.deviceId}>{input.label}</option>)}</select></label>;
   const modePicker = <div className="mode-picker" role="group" aria-label="Listening mode"><button type="button" className={listeningMode === "live" ? "is-active" : ""} onClick={() => chooseListeningMode("live")} disabled={isListening}><strong>Live</strong><span>Follow anything you play</span></button><button type="button" className={listeningMode === "vinyl" ? "is-active" : ""} onClick={() => chooseListeningMode("vinyl")} disabled={isListening}><strong>Vinyl</strong><span>Predict the album sequence</span></button></div>;
   const curationPicker = <div className="curation-picker" role="group" aria-label="Artwork curation"><button type="button" className={artCurationEnabled ? "is-active" : ""} onClick={() => chooseArtCuration(true)} disabled={isListening}>Art curation on</button><button type="button" className={!artCurationEnabled ? "is-active" : ""} onClick={() => chooseArtCuration(false)} disabled={isListening}>Music info only</button></div>;
-  const modeBadge = listeningMode === "vinyl" && vinylQueueLabel ? <aside className="vinyl-badge"><span>Vinyl mode</span><strong>{vinylQueueLabel}</strong></aside> : null;
+  const vinylFolio = listeningMode === "vinyl" && vinylProgress ? vinylFolioCopy(vinylProgress) : null;
+  const renderVinylFolio = (screen: "album" | "art") => vinylFolio ? <aside className={`vinyl-folio vinyl-folio--${screen}`} aria-label={`Vinyl playback: ${vinylFolio.sequence}`}><p className="vinyl-folio__label"><span />Vinyl</p>{screen === "art" && <p className="vinyl-folio__title">{currentTrack.title}</p>}<p className="vinyl-folio__sequence">{vinylFolio.sequence}</p></aside> : null;
   const vinylSeconds = vinylBoundaryAtRef.current ? Math.round((vinylBoundaryAtRef.current - Date.now()) / 1000) : undefined;
   const nextVinylHeartbeatAt = [vinylMidpointHeartbeatAtRef.current, vinylPreTransitionHeartbeatAtRef.current].filter((at) => at > 0).sort((left, right) => left - right)[0];
   const vinylHeartbeatSeconds = nextVinylHeartbeatAt ? Math.max(0, Math.round((nextVinylHeartbeatAt - Date.now()) / 1000)) : undefined;
@@ -653,7 +651,7 @@ export default function Home() {
   const transitionIndicator = !vinylSequenceIsActive && (recognitionPhase === "suspected" || recognitionPhase === "checking" || recognitionPhase === "matched") ? <aside className="transition-indicator" data-phase={recognitionPhase} aria-live="polite"><span className="signal-bars" aria-hidden="true"><i /><i /><i /><i /></span><span><small>{recognitionPhase === "suspected" ? "Listening closely" : recognitionPhase === "checking" ? "Checking the sound" : "Now playing"}</small><strong>{transitionLabel}</strong></span></aside> : null;
 
   if (act === "ready") return <main className="ready"><p className="eyebrow">Needle & Frame</p><h1>{hasLiveTrack ? "Listen again" : "Listen and identify"}</h1><p>{hasLiveTrack ? `Last identified: ${currentTrack.title} — ${currentTrack.artist}` : listeningMode === "vinyl" ? "Identify the record once, then let the album unfold." : "Identify a song, then discover a matching artwork."}</p>{modePicker}{curationPicker}{microphonePicker}{listenControl}<small>{status}</small>{transitionIndicator}{debugPanel}</main>;
-  if (act === "track" || act === "handoff") return <main className={`track-screen${act === "handoff" ? " is-handing-off" : ""}`}>{act === "handoff" && <div className="handoff-art" aria-hidden="true"><img className="handoff-backdrop" src={art.image} alt="" /><img className="handoff-image" src={art.image} alt="" /></div>}<div className="frame" key={trackKey(currentTrack)}><section className="album-panel"><div className="album-mat"><div className={`album-cover${currentTrack.albumCover ? "" : " is-missing"}`} style={{ backgroundImage: currentTrack.albumCover ? `url(${currentTrack.albumCover})` : undefined }} role="img" aria-label={currentTrack.albumCover ? `${currentTrack.album} album artwork` : "Album artwork unavailable"}>{!currentTrack.albumCover && <span>{currentTrack.album.slice(0, 1)}</span>}</div></div></section><section className="now-playing"><p className="eyebrow now-label"><span />Now playing</p><h1 className={`artist-name${currentTrack.artist.length > 20 ? " is-long" : ""}`}>{currentTrack.artist}</h1><h2 className={`song-title${currentTrack.title.length > 26 ? " is-long" : ""}`}>{currentTrack.title}</h2><div className="album-details"><p className="field-label">From the album</p><p className="album-name"><em>{currentTrack.album}</em><span className="release-year"> · {currentTrack.year}</span></p></div><p className="curation-status">{status}</p></section></div>{modeBadge}{transitionIndicator}{debugPanel}</main>;
-  if (act === "art" || act === "art-fade") return <main className={`art-intro${act === "art-fade" ? " is-info-fading" : ""}`} style={{ width: "min(100vw, calc(100vh * 16 / 9))", height: "min(100vh, calc(100vw * 9 / 16))", minHeight: 0, margin: "auto", aspectRatio: "16 / 9" }}><img className="art-image" style={{ position: "absolute", zIndex: 0, inset: "-3%", width: "106%", height: "106%", filter: "blur(26px) brightness(.38)", transform: "scale(1.06)" }} src={art.image} alt="" /><img className="art-image gallery-artwork" style={{ position: "absolute", zIndex: 1, inset: 0, objectFit: "cover" }} src={art.image} alt="" /><div className="art-overlay" style={{ zIndex: 2 }} /><section style={{ zIndex: 3 }}><p className="eyebrow">Selected artwork</p><h1 className={`art-title${art.title.length > 34 ? " is-long" : ""}`}><em>{art.title}</em></h1><h2>{art.artist}</h2><p>{art.date} · {art.museum}</p></section>{modeBadge}{transitionIndicator}{debugPanel}</main>;
-  return <main className={`gallery${act === "return" ? " is-returning" : ""}`} style={{ width: "min(100vw, calc(100vh * 16 / 9))", height: "min(100vh, calc(100vw * 9 / 16))", minHeight: 0, margin: "auto", aspectRatio: "16 / 9" }} onClick={() => setAct("ready")} aria-label={`${art.title} by ${art.artist}`}><img className="art-image" style={{ position: "absolute", zIndex: 0, inset: "-3%", width: "106%", height: "106%", filter: "blur(26px) brightness(.38)", transform: "scale(1.06)" }} src={art.image} alt="" /><img className="art-image gallery-artwork" style={{ position: "absolute", zIndex: 1, inset: 0, objectFit: "cover" }} src={art.image} alt={`${art.title} by ${art.artist}`} /><div className="gallery-overlay" aria-hidden="true" />{modeBadge}{transitionIndicator}{debugPanel}</main>;
+  if (act === "track" || act === "handoff") return <main className={`track-screen${act === "handoff" ? " is-handing-off" : ""}`}>{act === "handoff" && <div className="handoff-art" aria-hidden="true"><img className="handoff-backdrop" src={art.image} alt="" /><img className="handoff-image" src={art.image} alt="" /></div>}<div className="frame" key={trackKey(currentTrack)}><section className="album-panel"><div className="album-mat"><div className={`album-cover${currentTrack.albumCover ? "" : " is-missing"}`} style={{ backgroundImage: currentTrack.albumCover ? `url(${currentTrack.albumCover})` : undefined }} role="img" aria-label={currentTrack.albumCover ? `${currentTrack.album} album artwork` : "Album artwork unavailable"}>{!currentTrack.albumCover && <span>{currentTrack.album.slice(0, 1)}</span>}</div></div></section><section className="now-playing"><p className="eyebrow now-label"><span />Now playing</p><h1 className={`artist-name${currentTrack.artist.length > 20 ? " is-long" : ""}`}>{currentTrack.artist}</h1><h2 className={`song-title${currentTrack.title.length > 26 ? " is-long" : ""}`}>{currentTrack.title}</h2><div className="album-details"><p className="field-label">From the album</p><p className="album-name"><em>{currentTrack.album}</em><span className="release-year"> · {currentTrack.year}</span></p></div></section>{renderVinylFolio("album")}{artCurationEnabled && <p className="curation-status" role="status"><span aria-hidden="true" />{status}</p>}</div>{transitionIndicator}{debugPanel}</main>;
+  if (act === "art" || act === "art-fade") return <main className={`art-intro${act === "art-fade" ? " is-info-fading" : ""}`} style={{ width: "min(100vw, calc(100vh * 16 / 9))", height: "min(100vh, calc(100vw * 9 / 16))", minHeight: 0, margin: "auto", aspectRatio: "16 / 9" }}><img className="art-image" style={{ position: "absolute", zIndex: 0, inset: "-3%", width: "106%", height: "106%", filter: "blur(26px) brightness(.38)", transform: "scale(1.06)" }} src={art.image} alt="" /><img className="art-image gallery-artwork" style={{ position: "absolute", zIndex: 1, inset: 0, objectFit: "cover" }} src={art.image} alt="" /><div className="art-overlay" style={{ zIndex: 2 }} /><section style={{ zIndex: 3 }}><p className="eyebrow">Selected artwork</p><h1 className={`art-title${art.title.length > 34 ? " is-long" : ""}`}><em>{art.title}</em></h1><h2>{art.artist}</h2><p>{art.date} · {art.museum}</p></section>{renderVinylFolio("art")}{transitionIndicator}{debugPanel}</main>;
+  return <main className={`gallery${act === "return" ? " is-returning" : ""}`} style={{ width: "min(100vw, calc(100vh * 16 / 9))", height: "min(100vh, calc(100vw * 9 / 16))", minHeight: 0, margin: "auto", aspectRatio: "16 / 9" }} onClick={() => setAct("ready")} aria-label={`${art.title} by ${art.artist}`}><img className="art-image" style={{ position: "absolute", zIndex: 0, inset: "-3%", width: "106%", height: "106%", filter: "blur(26px) brightness(.38)", transform: "scale(1.06)" }} src={art.image} alt="" /><img className="art-image gallery-artwork" style={{ position: "absolute", zIndex: 1, inset: 0, objectFit: "cover" }} src={art.image} alt={`${art.title} by ${art.artist}`} /><div className="gallery-overlay" aria-hidden="true" />{renderVinylFolio("art")}{transitionIndicator}{debugPanel}</main>;
 }
