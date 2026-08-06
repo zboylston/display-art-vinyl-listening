@@ -309,7 +309,10 @@ export default function Home() {
       if (!vinylAnchored) scheduleFallbackForTrack(track);
       if (key === lastTrackKeyRef.current) {
         if (vinylAnchored) preloadNextVinylArtwork();
-        setStatus("Still listening…"); return "same";
+        setStatus(vinylAnchored
+          ? "Vinyl sequence locked — preparing the artwork."
+          : "Still listening…");
+        return "same";
       }
       lastTrackKeyRef.current = key;
       if (vinylAnchored) preloadNextVinylArtwork();
@@ -350,7 +353,12 @@ export default function Home() {
     } else consecutiveNoMatchRef.current = 0;
     setAudioDebug((debug) => ({ ...debug, reason: `${reason}:${outcome}` }));
     if (phaseTimerRef.current) window.clearTimeout(phaseTimerRef.current);
-    if (outcome === "match") {
+    if (outcome === "match" && listeningModeRef.current === "vinyl" && vinylAlbumRef.current) {
+      // Once a record has been identified, Vinyl Mode should feel settled.
+      // The microphone remains available for the next predicted boundary, but
+      // we deliberately hide the active-listening phase during presentation.
+      changeRecognitionPhase("idle");
+    } else if (outcome === "match") {
       changeRecognitionPhase("matched");
       phaseTimerRef.current = window.setTimeout(() => changeRecognitionPhase("listening"), 2_800);
     } else changeRecognitionPhase("listening");
