@@ -87,7 +87,7 @@ export function normalizeDossier(value: unknown): SongDossier {
     sonic_and_thematic_reading: typeof dossier.sonic_and_thematic_reading === "string"
       ? dossier.sonic_and_thematic_reading.trim()
       : "",
-    literal_traps_to_avoid: strings(dossier.literal_traps_to_avoid, 6),
+    literal_traps_to_avoid: strings(dossier.literal_traps_to_avoid, 3),
     artist_or_album_priors: strings(dossier.artist_or_album_priors, 6),
   };
 }
@@ -150,7 +150,7 @@ export function normalizeBrief(value: unknown, dossier: SongDossier, track: Clea
     formal_qualities: strings(brief.formal_qualities, 6),
     cultural_context: strings(brief.cultural_context, 4),
     visual_direction: strings(brief.visual_direction, 6),
-    avoid: strings(brief.avoid, 8),
+    avoid: strings(brief.avoid, 4),
     mood: strings(brief.mood, 6),
     energy,
     palette: strings(brief.palette, 5),
