@@ -1,0 +1,582 @@
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+import { AudioChangeDetector, rmsFromSamples, spectrumBandsFromDb, type DetectorState } from "./lib/audio-change-detector";
+import { canonicalTrackKey, INITIAL_DISCOVERY_CAPTURE_MS, noMatchRetryDelay, RecognitionGate } from "./lib/recognition";
+import { isNearVinylBoundary, remainingTrackMs, shiftedBoundaryAfterPause } from "./lib/vinyl-mode";
+import { encodeMonoWav, prepareRecognitionAudio } from "./lib/wav";
+
+type Act = "ready" | "track" | "handoff" | "art" | "art-fade" | "gallery";
+type ListeningMode = "live" | "vinyl";
+type AudioInput = { deviceId: string; label: string };
+type Artwork = { title: string; artist: string; date: string; museum: string; image: string; rationale: string };
+type Track = { artist: string; title: string; album: string; year: string; albumCover?: string; isrc?: string; durationMs?: number; timecodeMs?: number; collectionId?: number; trackNumber?: number; discNumber?: number };
+type RecognitionReason = "music-started" | "music-resumed" | "spectral-change" | "expected-ending" | "safety-check" | "legacy-fallback";
+type RingSnapshot = { samples: Float32Array; sampleRate: number };
+type SnapshotRequest = { resolve: (snapshot: RingSnapshot) => void; reject: (error: Error) => void; timeout: number };
+type AudioDebug = { state: DetectorState; score: number; rms: number; reason: string };
+type RecognitionPhase = "idle" | "listening" | "suspected" | "checking" | "matched";
+type RecognitionOutcome = "match" | "same" | "none" | "error";
+
+const fixtureTrack: Track = { artist: "Nick Drake", title: "Pink Moon", album: "Pink Moon", year: "1972", albumCover: "https://i.scdn.co/image/ab67616d0000b273e369195caf5d169bf5e9eafc" };
+const initialArt: Artwork = { title: "Composition VIII", artist: "Wassily Kandinsky", date: "1923", museum: "Solomon R. Guggenheim Museum", image: "/kandinsky-composition-viii.jpg", rationale: "A study in suspended geometry and rhythmic space." };
+const SAMPLE_MS = 9000;
+const FEATURE_INTERVAL_MS = 250;
+const SNAPSHOT_SECONDS = 15;
+const RECOGNITION_COOLDOWN_MS = 15_000;
+const NO_MATCH_COOLDOWN_MS = 8_000;
+const SAFETY_CHECK_MS = 120_000;
+const LEGACY_CHECK_MS = 30_000;
+// Leave this switch in place until the detector has been tuned against real-room audio.
+const USE_AUDIO_CHANGE_DETECTOR = true;
+const TRACK_INFO_MS = 10000;
+const INFO_TO_ART_DISSOLVE_MS = 6500;
+const ART_INFO_HOLD_MS = 9000;
+const ART_INFO_FADE_MS = 3500;
+const CURATION_CACHE_VERSION = "v5-comparative-curation";
+const VINYL_TIMER_VERIFY_MS = 12_000;
+
+function trackKey(track: Track) { return canonicalTrackKey(track); }
+
+function timecodeToMs(timecode?: string): number | undefined {
+  if (!timecode) return undefined;
+  const parts = timecode.split(":").map(Number);
+  if (parts.some((part) => !Number.isFinite(part))) return undefined;
+  if (parts.length === 2) return (parts[0] * 60 + parts[1]) * 1000;
+  if (parts.length === 3) return (parts[0] * 3600 + parts[1] * 60 + parts[2]) * 1000;
+  return undefined;
+}
+
+export default function Home() {
+  const [act, setAct] = useState<Act>("ready");
+  const [currentTrack, setCurrentTrack] = useState<Track>(fixtureTrack);
+  const [listeningMode, setListeningMode] = useState<ListeningMode>("live");
+  const [artCurationEnabled, setArtCurationEnabled] = useState(true);
+  const [vinylQueueLabel, setVinylQueueLabel] = useState("");
+  const [audioInputs, setAudioInputs] = useState<AudioInput[]>([]);
+  const [selectedDeviceId, setSelectedDeviceId] = useState("");
+  const [activeMicrophone, setActiveMicrophone] = useState("");
+  const [art, setArt] = useState<Artwork>(initialArt);
+  const [status, setStatus] = useState("Ready to listen.");
+  const [isListening, setIsListening] = useState(false);
+  const [showAudioDebug, setShowAudioDebug] = useState(false);
+  const [auddCalls, setAuddCalls] = useState(0);
+  const [audioDebug, setAudioDebug] = useState<AudioDebug>({ state: "warming", score: 0, rms: 0, reason: "idle" });
+  const [captureDebug, setCaptureDebug] = useState("");
+  const [lastSampleUrl, setLastSampleUrl] = useState<string | null>(null);
+  const [recognitionPhase, setRecognitionPhase] = useState<RecognitionPhase>("idle");
+  const currentTrackRef = useRef(currentTrack);
+  const listeningModeRef = useRef<ListeningMode>("live");
+  const artCurationEnabledRef = useRef(true);
+  const streamRef = useRef<MediaStream | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const workletRef = useRef<AudioWorkletNode | null>(null);
+  const silentGainRef = useRef<GainNode | null>(null);
+  const frequencyDataRef = useRef<Float32Array<ArrayBuffer> | null>(null);
+  const waveformDataRef = useRef<Float32Array<ArrayBuffer> | null>(null);
+  const animationFrameRef = useRef<number | null>(null);
+  const listeningRef = useRef(false);
+  const recordingRef = useRef(false);
+  const lastTrackKeyRef = useRef("");
+  const lastCheckAtRef = useRef(0);
+  const nextFallbackAtRef = useRef(0);
+  const nextFallbackReasonRef = useRef<RecognitionReason>("safety-check");
+  const consecutiveNoMatchRef = useRef(0);
+  const lastFeatureAtRef = useRef(0);
+  const lastDebugAtRef = useRef(0);
+  const detectorRef = useRef(new AudioChangeDetector());
+  const recognitionGateRef = useRef(new RecognitionGate());
+  const snapshotRequestIdRef = useRef(0);
+  const snapshotRequestsRef = useRef(new Map<number, SnapshotRequest>());
+  const recognitionPhaseRef = useRef<RecognitionPhase>("idle");
+  const phaseTimerRef = useRef<number | null>(null);
+  const presentationIdRef = useRef(0);
+  const lastSampleUrlRef = useRef<string | null>(null);
+  const vinylAlbumRef = useRef<{ tracks: Track[]; index: number } | null>(null);
+  const vinylBoundaryAtRef = useRef(0);
+  const vinylPauseAtRef = useRef(0);
+  const vinylGapPendingRef = useRef(false);
+  const vinylAdvanceInFlightRef = useRef(false);
+  const vinylPreloadRef = useRef<{ key: string; promise: Promise<Artwork> } | null>(null);
+  const previousDetectorStateRef = useRef<DetectorState>("warming");
+  const hasLiveTrack = currentTrack !== fixtureTrack;
+
+  useEffect(() => { currentTrackRef.current = currentTrack; }, [currentTrack]);
+  useEffect(() => { setShowAudioDebug(new URLSearchParams(window.location.search).get("debugAudio") === "1"); }, []);
+  useEffect(() => {
+    if (act === "art") { const timer = window.setTimeout(() => setAct("art-fade"), ART_INFO_HOLD_MS); return () => window.clearTimeout(timer); }
+    if (act === "art-fade") { const timer = window.setTimeout(() => setAct("gallery"), ART_INFO_FADE_MS); return () => window.clearTimeout(timer); }
+  }, [act]);
+  useEffect(() => {
+    const mediaDevices = navigator.mediaDevices;
+    if (!mediaDevices?.enumerateDevices) return;
+    const refresh = () => void mediaDevices.enumerateDevices().then((devices) => setAudioInputs(devices
+      .filter((device) => device.kind === "audioinput")
+      .map((device, index) => ({ deviceId: device.deviceId, label: device.label || `Microphone ${index + 1}` })))).catch(() => undefined);
+    refresh();
+    mediaDevices.addEventListener?.("devicechange", refresh);
+    return () => mediaDevices.removeEventListener?.("devicechange", refresh);
+  }, []);
+  useEffect(() => () => {
+    listeningRef.current = false;
+    if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
+    streamRef.current?.getTracks().forEach((mediaTrack) => mediaTrack.stop());
+    for (const pending of snapshotRequestsRef.current.values()) { window.clearTimeout(pending.timeout); pending.reject(new Error("Listening stopped.")); }
+    snapshotRequestsRef.current.clear();
+    if (phaseTimerRef.current) window.clearTimeout(phaseTimerRef.current);
+    if (lastSampleUrlRef.current) URL.revokeObjectURL(lastSampleUrlRef.current);
+    void audioContextRef.current?.close();
+  }, []);
+
+  function changeRecognitionPhase(phase: RecognitionPhase) {
+    if (recognitionPhaseRef.current === phase) return;
+    recognitionPhaseRef.current = phase;
+    setRecognitionPhase(phase);
+  }
+
+  function readCachedArtwork(key: string): Artwork | null { try { const value = localStorage.getItem(`music-art:artwork:${CURATION_CACHE_VERSION}:${key}`); return value ? JSON.parse(value) as Artwork : null; } catch { return null; } }
+  function cacheArtwork(key: string, artwork: Artwork) { try { localStorage.setItem(`music-art:artwork:${CURATION_CACHE_VERSION}:${key}`, JSON.stringify(artwork)); } catch { /* Cache is optional. */ } }
+
+  async function fetchArtwork(track: Track, announce = true): Promise<Artwork> {
+    if (announce) setStatus("Curating an artwork for this song…");
+    const response = await fetch("/api/curate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ track }), signal: AbortSignal.timeout(150000) });
+    const artwork = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(artwork.error ?? "Artwork selection is unavailable.");
+    if (announce) setStatus("Selecting a work from the collection…");
+    const image = `/api/art-image?source=${encodeURIComponent(artwork.image)}`;
+    const preload = new Image(); preload.src = image; await preload.decode();
+    return { ...artwork, image };
+  }
+
+  async function presentTrack(track: Track, preparedArtwork?: Artwork) {
+    const presentationId = ++presentationIdRef.current;
+    const trackScreenStartedAt = Date.now();
+    const key = trackKey(track);
+    setCurrentTrack(track); setAct("track");
+    if (!artCurationEnabledRef.current) {
+      setStatus(listeningModeRef.current === "vinyl" ? "Vinyl sequence is active — music information only." : "Music information only.");
+      return;
+    }
+    const cached = readCachedArtwork(key);
+    const artwork = preparedArtwork ?? cached ?? await fetchArtwork(track);
+    if (presentationId !== presentationIdRef.current) return;
+    if (!cached && !preparedArtwork) cacheArtwork(key, artwork);
+    setArt(artwork); setStatus("Artwork selected");
+    const remainingTrackTime = Math.max(0, TRACK_INFO_MS - (Date.now() - trackScreenStartedAt));
+    window.setTimeout(() => {
+      if (presentationId !== presentationIdRef.current) return;
+      setAct("handoff");
+      window.setTimeout(() => { if (presentationId === presentationIdRef.current) setAct("art"); }, INFO_TO_ART_DISSOLVE_MS);
+    }, remainingTrackTime);
+  }
+
+  function resetVinylPrediction() {
+    vinylAlbumRef.current = null;
+    vinylBoundaryAtRef.current = 0;
+    vinylPauseAtRef.current = 0;
+    vinylGapPendingRef.current = false;
+    vinylAdvanceInFlightRef.current = false;
+    vinylPreloadRef.current = null;
+    setVinylQueueLabel("");
+  }
+
+  function updateVinylQueueLabel() {
+    const album = vinylAlbumRef.current;
+    if (!album) { setVinylQueueLabel(""); return; }
+    const current = album.tracks[album.index];
+    const next = album.tracks[album.index + 1];
+    setVinylQueueLabel(`Track ${album.index + 1} of ${album.tracks.length}${current?.discNumber ? ` · disc ${current.discNumber}` : ""}${next ? ` · next: ${next.title}` : " · album ending"}`);
+  }
+
+  function anchorVinylSequence(result: Record<string, unknown>, recognizedTrack: Track) {
+    if (listeningModeRef.current !== "vinyl" || !Array.isArray(result.albumSequence) || !result.albumSequence.length) return false;
+    const tracks = result.albumSequence.filter((item): item is Track => Boolean(item && typeof item === "object" && "artist" in item && "title" in item && "album" in item));
+    const suppliedIndex = typeof result.sequenceIndex === "number" ? result.sequenceIndex : -1;
+    const matchedIndex = suppliedIndex >= 0 ? suppliedIndex : tracks.findIndex((track) => trackKey(track) === trackKey(recognizedTrack));
+    if (!tracks.length || matchedIndex < 0 || matchedIndex >= tracks.length) return false;
+    tracks[matchedIndex] = {
+      ...tracks[matchedIndex],
+      ...recognizedTrack,
+      durationMs: recognizedTrack.durationMs ?? tracks[matchedIndex].durationMs,
+      albumCover: recognizedTrack.albumCover ?? tracks[matchedIndex].albumCover,
+    };
+    vinylAlbumRef.current = { tracks, index: matchedIndex };
+    const remaining = remainingTrackMs(recognizedTrack.durationMs ?? tracks[matchedIndex].durationMs, recognizedTrack.timecodeMs);
+    vinylBoundaryAtRef.current = remaining ? Date.now() + remaining : 0;
+    vinylPauseAtRef.current = 0;
+    vinylGapPendingRef.current = false;
+    nextFallbackAtRef.current = 0;
+    updateVinylQueueLabel();
+    return true;
+  }
+
+  function preloadNextVinylArtwork() {
+    if (!artCurationEnabledRef.current) return;
+    const album = vinylAlbumRef.current;
+    const next = album?.tracks[album.index + 1];
+    if (!next) { vinylPreloadRef.current = null; return; }
+    const key = trackKey(next);
+    if (vinylPreloadRef.current?.key === key) return;
+    const cached = readCachedArtwork(key);
+    const promise = cached ? Promise.resolve(cached) : fetchArtwork(next, false).then((artwork) => {
+      cacheArtwork(key, artwork);
+      return artwork;
+    });
+    vinylPreloadRef.current = { key, promise };
+    void promise.catch(() => {
+      if (vinylPreloadRef.current?.key === key) vinylPreloadRef.current = null;
+    });
+  }
+
+  async function advanceVinyl(reason: "gap" | "timer" | "spectral") {
+    const album = vinylAlbumRef.current;
+    if (!album || vinylAdvanceInFlightRef.current) return false;
+    const nextIndex = album.index + 1;
+    const next = album.tracks[nextIndex];
+    if (!next) {
+      vinylBoundaryAtRef.current = 0;
+      setVinylQueueLabel("Album complete · waiting for another record");
+      setStatus("The album sequence is complete — listening for the next record.");
+      return false;
+    }
+    vinylAdvanceInFlightRef.current = true;
+    album.index = nextIndex;
+    next.timecodeMs = 0;
+    vinylBoundaryAtRef.current = next.durationMs ? Date.now() + next.durationMs : 0;
+    vinylPauseAtRef.current = 0;
+    vinylGapPendingRef.current = false;
+    lastTrackKeyRef.current = trackKey(next);
+    updateVinylQueueLabel();
+    changeRecognitionPhase("matched");
+    if (phaseTimerRef.current) window.clearTimeout(phaseTimerRef.current);
+    phaseTimerRef.current = window.setTimeout(() => changeRecognitionPhase("listening"), 2_800);
+    if (reason === "timer") {
+      nextFallbackAtRef.current = Date.now() + VINYL_TIMER_VERIFY_MS;
+      nextFallbackReasonRef.current = "expected-ending";
+    } else nextFallbackAtRef.current = 0;
+    try {
+      const preload = vinylPreloadRef.current?.key === trackKey(next) ? vinylPreloadRef.current.promise : undefined;
+      const prepared = preload ? await preload.catch(() => undefined) : undefined;
+      vinylPreloadRef.current = null;
+      await presentTrack(next, prepared);
+      preloadNextVinylArtwork();
+      return true;
+    } finally {
+      vinylAdvanceInFlightRef.current = false;
+    }
+  }
+
+  function scheduleFallbackForTrack(track: Track) {
+    const now = Date.now();
+    const remaining = track.durationMs && track.timecodeMs !== undefined ? track.durationMs - track.timecodeMs : undefined;
+    const delay = remaining && remaining > 0 ? Math.min(SAFETY_CHECK_MS, Math.max(30_000, remaining + 2_500)) : SAFETY_CHECK_MS;
+    nextFallbackAtRef.current = now + delay;
+    nextFallbackReasonRef.current = delay < SAFETY_CHECK_MS ? "expected-ending" : "safety-check";
+  }
+
+  async function identifyRecording(audio: Blob): Promise<RecognitionOutcome> {
+    try {
+      setStatus("Identifying the music…");
+      setAuddCalls((count) => count + 1);
+      const extension = audio.type.includes("wav") ? "wav" : audio.type.includes("mp4") ? "m4a" : "webm";
+      const form = new FormData(); form.append("audio", audio, `capture.${extension}`); form.append("mode", listeningModeRef.current);
+      const response = await fetch("/api/recognize", { method: "POST", body: form, signal: AbortSignal.timeout(40000) });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        setStatus(`Recognition error ${response.status}: ${data.error ?? "Unknown response"}`);
+        return "error";
+      }
+      if (!data.result) {
+        setStatus(listeningRef.current ? "No confident match yet — still listening…" : "No match found.");
+        return "none";
+      }
+      const track: Track = {
+        artist: data.result.artist ?? "Unknown artist",
+        title: data.result.title ?? "Unknown track",
+        album: data.result.album ?? "Album unknown",
+        year: (data.result.releaseDate ?? "").slice(0, 4),
+        albumCover: data.result.albumCover,
+        isrc: data.result.isrc,
+        durationMs: data.result.durationMs,
+        timecodeMs: timecodeToMs(data.result.timecode),
+        collectionId: data.result.collectionId,
+        trackNumber: data.result.trackNumber,
+        discNumber: data.result.discNumber,
+      };
+      const key = trackKey(track);
+      const vinylAnchored = anchorVinylSequence(data.result as Record<string, unknown>, track);
+      if (!vinylAnchored) scheduleFallbackForTrack(track);
+      if (key === lastTrackKeyRef.current) {
+        if (vinylAnchored) preloadNextVinylArtwork();
+        setStatus("Still listening…"); return "same";
+      }
+      lastTrackKeyRef.current = key;
+      if (vinylAnchored) preloadNextVinylArtwork();
+      const presentation = presentTrack(track);
+      void presentation.catch((error) => setStatus(error instanceof Error ? error.message : "Artwork selection is unavailable."));
+      return "match";
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Music identification failed.");
+      return "none";
+    }
+  }
+
+  function takeRingSnapshot(seconds = SNAPSHOT_SECONDS): Promise<RingSnapshot> {
+    const worklet = workletRef.current;
+    if (!worklet) return Promise.reject(new Error("Audio ring buffer is unavailable."));
+    const requestId = ++snapshotRequestIdRef.current;
+    return new Promise((resolve, reject) => {
+      const timeout = window.setTimeout(() => {
+        snapshotRequestsRef.current.delete(requestId);
+        reject(new Error("Audio snapshot timed out."));
+      }, 2_000);
+      snapshotRequestsRef.current.set(requestId, { resolve, reject, timeout });
+      worklet.port.postMessage({ type: "snapshot", requestId, seconds });
+    });
+  }
+
+  function finishRecognition(outcome: RecognitionOutcome, reason: RecognitionReason) {
+    const now = Date.now();
+    const cooldown = outcome === "none" || outcome === "error" ? NO_MATCH_COOLDOWN_MS : RECOGNITION_COOLDOWN_MS;
+    recognitionGateRef.current.finish(now, cooldown);
+    detectorRef.current.markRecognition(now, cooldown);
+    detectorRef.current.resetHistory(now);
+    if (outcome === "none" || outcome === "error") {
+      consecutiveNoMatchRef.current += 1;
+      const retryDelay = noMatchRetryDelay(Boolean(lastTrackKeyRef.current), consecutiveNoMatchRef.current, SAFETY_CHECK_MS);
+      nextFallbackAtRef.current = now + retryDelay;
+      nextFallbackReasonRef.current = "safety-check";
+    } else consecutiveNoMatchRef.current = 0;
+    setAudioDebug((debug) => ({ ...debug, reason: `${reason}:${outcome}` }));
+    if (phaseTimerRef.current) window.clearTimeout(phaseTimerRef.current);
+    if (outcome === "match") {
+      changeRecognitionPhase("matched");
+      phaseTimerRef.current = window.setTimeout(() => changeRecognitionPhase("listening"), 2_800);
+    } else changeRecognitionPhase("listening");
+  }
+
+  function captureLegacySample(reason: RecognitionReason) {
+    if (!listeningRef.current || recordingRef.current || !streamRef.current) { recognitionGateRef.current.cancel(); return; }
+    recordingRef.current = true;
+    const preferredType = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"].find((type) => MediaRecorder.isTypeSupported(type));
+    const recorder = preferredType ? new MediaRecorder(streamRef.current, { mimeType: preferredType, audioBitsPerSecond: 128000 }) : new MediaRecorder(streamRef.current);
+    const chunks: BlobPart[] = [];
+    recorder.ondataavailable = (event) => chunks.push(event.data);
+    recorder.onstop = () => {
+      recordingRef.current = false;
+      if (!chunks.length) { recognitionGateRef.current.cancel(); return; }
+      void identifyRecording(new Blob(chunks, { type: recorder.mimeType || "audio/webm" })).then((outcome) => finishRecognition(outcome, reason));
+    };
+    recorder.start(); setStatus("Listening to confirm the song…");
+    window.setTimeout(() => { if (recorder.state === "recording") recorder.stop(); }, SAMPLE_MS);
+  }
+
+  async function requestRecognition(reason: RecognitionReason) {
+    const now = Date.now();
+    if (!listeningRef.current || !recognitionGateRef.current.tryStart(now)) return;
+    lastCheckAtRef.current = now;
+    detectorRef.current.markRecognition(now, RECOGNITION_COOLDOWN_MS);
+    changeRecognitionPhase("checking");
+    setAudioDebug((debug) => ({ ...debug, reason }));
+    if (!workletRef.current) { captureLegacySample("legacy-fallback"); return; }
+    try {
+      setStatus("Checking the song…");
+      // After a real gap, exclude the preceding track from the upload. Five
+      // post-gap seconds are enough for AudD and avoid a mixed-song sample.
+      const discoveryRetry = listeningModeRef.current === "vinyl" && !lastTrackKeyRef.current && consecutiveNoMatchRef.current > 0;
+      const discoveryRetrySeconds = discoveryRetry ? 24 : SNAPSHOT_SECONDS;
+      const snapshot = await takeRingSnapshot(reason === "music-resumed" ? 5 : discoveryRetrySeconds);
+      if (snapshot.samples.length < snapshot.sampleRate * 4) throw new Error("Waiting for a longer music sample.");
+      const prepared = prepareRecognitionAudio(snapshot.samples, snapshot.sampleRate, discoveryRetry);
+      const audio = encodeMonoWav(prepared.samples, snapshot.sampleRate);
+      setCaptureDebug(`clip ${(prepared.samples.length / snapshot.sampleRate).toFixed(1)}s${prepared.conditioned ? " · EQ" : ""} · in ${prepared.inputRms.toFixed(3)} · gain ${prepared.gain.toFixed(1)}× · out ${prepared.outputRms.toFixed(3)}`);
+      if (showAudioDebug) {
+        if (lastSampleUrlRef.current) URL.revokeObjectURL(lastSampleUrlRef.current);
+        const sampleUrl = URL.createObjectURL(audio);
+        lastSampleUrlRef.current = sampleUrl;
+        setLastSampleUrl(sampleUrl);
+      }
+      const outcome = await identifyRecording(audio);
+      finishRecognition(outcome, reason);
+    } catch (error) {
+      recognitionGateRef.current.finish(Date.now(), NO_MATCH_COOLDOWN_MS);
+      detectorRef.current.markRecognition(Date.now(), NO_MATCH_COOLDOWN_MS);
+      nextFallbackAtRef.current = Date.now() + 10_000;
+      changeRecognitionPhase("listening");
+      setStatus(error instanceof Error ? error.message : "Music identification failed.");
+    }
+  }
+
+  function monitorSound() {
+    if (!listeningRef.current || !analyserRef.current) return;
+    const now = performance.now();
+    if (now - lastFeatureAtRef.current >= FEATURE_INTERVAL_MS) {
+      lastFeatureAtRef.current = now;
+      const analyser = analyserRef.current;
+      const frequency = frequencyDataRef.current;
+      const waveform = waveformDataRef.current;
+      if (frequency && waveform) {
+        analyser.getFloatFrequencyData(frequency);
+        analyser.getFloatTimeDomainData(waveform);
+        const update = detectorRef.current.push({
+          at: Date.now(),
+          spectrum: spectrumBandsFromDb(frequency, audioContextRef.current?.sampleRate ?? 48_000, analyser.fftSize),
+          rms: rmsFromSamples(waveform),
+        });
+        const vinylMode = listeningModeRef.current === "vinyl";
+        const predictiveVinyl = vinylMode && Boolean(vinylAlbumRef.current);
+        const vinylHasNext = Boolean(vinylAlbumRef.current?.tracks[(vinylAlbumRef.current?.index ?? -1) + 1]);
+        const wallNow = Date.now();
+        const nearPredictedBoundary = predictiveVinyl && isNearVinylBoundary(vinylBoundaryAtRef.current, wallNow);
+        if (now - lastDebugAtRef.current >= 1_000) {
+          lastDebugAtRef.current = now;
+          setAudioDebug((debug) => ({ ...debug, state: update.state, score: update.score, rms: update.rms }));
+        }
+        if ((!predictiveVinyl || nearPredictedBoundary) && (update.state === "resuming" || update.state === "suspected") && recognitionPhaseRef.current === "listening") {
+          changeRecognitionPhase("suspected");
+          setStatus("Possible new song — listening for a moment…");
+        } else if ((predictiveVinyl && !nearPredictedBoundary || update.state === "stable" || update.state === "warming") && recognitionPhaseRef.current === "suspected") {
+          changeRecognitionPhase("listening");
+          setStatus("Still listening…");
+        }
+        if (vinylMode && update.event === "silence" && vinylAlbumRef.current) {
+          if (isNearVinylBoundary(vinylBoundaryAtRef.current, wallNow)) {
+            vinylGapPendingRef.current = true;
+            setStatus("Preparing next track…");
+          } else {
+            vinylPauseAtRef.current = wallNow;
+          }
+        }
+        if (vinylMode && previousDetectorStateRef.current === "silence" && update.state === "resuming") {
+          if (vinylGapPendingRef.current) void advanceVinyl("gap");
+          else if (vinylPauseAtRef.current) {
+            vinylBoundaryAtRef.current = shiftedBoundaryAfterPause(vinylBoundaryAtRef.current, vinylPauseAtRef.current, wallNow);
+            vinylPauseAtRef.current = 0;
+            setStatus("Playback resumed — record timing restored.");
+          }
+        }
+        if (USE_AUDIO_CHANGE_DETECTOR && update.event === "music-started") void requestRecognition("music-started");
+        if (USE_AUDIO_CHANGE_DETECTOR && update.event === "music-resumed" && (!predictiveVinyl || !vinylHasNext)) void requestRecognition("music-resumed");
+        if (USE_AUDIO_CHANGE_DETECTOR && update.event === "change-suspected") {
+          if (!vinylMode || !vinylAlbumRef.current) void requestRecognition("spectral-change");
+          else if (isNearVinylBoundary(vinylBoundaryAtRef.current, wallNow)) void advanceVinyl("spectral");
+        }
+        if (vinylMode && vinylAlbumRef.current && vinylBoundaryAtRef.current > 0
+          && wallNow >= vinylBoundaryAtRef.current && update.state !== "silence" && !vinylPauseAtRef.current) {
+          void advanceVinyl("timer");
+        }
+        previousDetectorStateRef.current = update.state;
+      }
+      const wallNow = Date.now();
+      if (nextFallbackAtRef.current > 0 && wallNow >= nextFallbackAtRef.current) {
+        nextFallbackAtRef.current = wallNow + SAFETY_CHECK_MS;
+        void requestRecognition(nextFallbackReasonRef.current);
+      } else if (!USE_AUDIO_CHANGE_DETECTOR && wallNow - lastCheckAtRef.current >= LEGACY_CHECK_MS) void requestRecognition("legacy-fallback");
+    }
+    animationFrameRef.current = requestAnimationFrame(monitorSound);
+  }
+
+  async function startListenMode() {
+    if (listeningRef.current) return;
+    try {
+      if (listeningModeRef.current === "vinyl") {
+        resetVinylPrediction();
+        lastTrackKeyRef.current = "";
+      }
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { deviceId: selectedDeviceId ? { exact: selectedDeviceId } : undefined, echoCancellation: false, noiseSuppression: false, autoGainControl: true, channelCount: 1, sampleRate: 48_000 },
+      });
+      const microphoneTrack = stream.getAudioTracks()[0];
+      setActiveMicrophone(microphoneTrack?.label ?? "Default microphone");
+      const actualDeviceId = microphoneTrack?.getSettings().deviceId;
+      if (actualDeviceId) setSelectedDeviceId(actualDeviceId);
+      void navigator.mediaDevices.enumerateDevices().then((devices) => setAudioInputs(devices
+        .filter((device) => device.kind === "audioinput")
+        .map((device, index) => ({ deviceId: device.deviceId, label: device.label || `Microphone ${index + 1}` })))).catch(() => undefined);
+      const context = new AudioContext(); await context.resume();
+      const analyser = context.createAnalyser(); analyser.fftSize = 2048; analyser.smoothingTimeConstant = 0.35;
+      const source = context.createMediaStreamSource(stream); source.connect(analyser);
+      let worklet: AudioWorkletNode | null = null;
+      let silentGain: GainNode | null = null;
+      try {
+        await context.audioWorklet.addModule("/audio-ring-buffer-worklet.js?v=24s-eq");
+        worklet = new AudioWorkletNode(context, "audio-ring-buffer", { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] });
+        silentGain = context.createGain(); silentGain.gain.value = 0;
+        source.connect(worklet); worklet.connect(silentGain); silentGain.connect(context.destination);
+        worklet.port.onmessage = (event: MessageEvent<{ type?: string; requestId?: number; sampleRate?: number; samples?: ArrayBuffer }>) => {
+          const message = event.data;
+          if (message.type !== "snapshot" || message.requestId === undefined || !message.samples || !message.sampleRate) return;
+          const pending = snapshotRequestsRef.current.get(message.requestId);
+          if (!pending) return;
+          window.clearTimeout(pending.timeout); snapshotRequestsRef.current.delete(message.requestId);
+          pending.resolve({ samples: new Float32Array(message.samples), sampleRate: message.sampleRate });
+        };
+      } catch (error) { console.warn("Audio ring buffer unavailable; using MediaRecorder fallback.", error); }
+      streamRef.current = stream; audioContextRef.current = context; analyserRef.current = analyser;
+      workletRef.current = worklet; silentGainRef.current = silentGain;
+      frequencyDataRef.current = new Float32Array(analyser.frequencyBinCount);
+      waveformDataRef.current = new Float32Array(analyser.fftSize);
+      detectorRef.current = new AudioChangeDetector(); recognitionGateRef.current = new RecognitionGate();
+      previousDetectorStateRef.current = "warming";
+      lastFeatureAtRef.current = 0; lastCheckAtRef.current = Date.now();
+      nextFallbackAtRef.current = Date.now() + (lastTrackKeyRef.current ? SAFETY_CHECK_MS : INITIAL_DISCOVERY_CAPTURE_MS);
+      consecutiveNoMatchRef.current = 0; listeningRef.current = true; setIsListening(true);
+      changeRecognitionPhase("listening");
+      setStatus(worklet
+        ? listeningModeRef.current === "vinyl" ? "Vinyl mode is listening — identifying the record…" : "Listen mode is on — learning the sound…"
+        : "Listen mode is on — compatibility capture enabled…");
+      if (!worklet || !USE_AUDIO_CHANGE_DETECTOR) window.setTimeout(() => void requestRecognition("legacy-fallback"), 1_000);
+      monitorSound();
+    } catch (error) { setStatus(error instanceof Error ? error.message : "Microphone access is unavailable."); }
+  }
+
+  function stopListenMode() {
+    listeningRef.current = false; setIsListening(false); changeRecognitionPhase("idle");
+    if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
+    animationFrameRef.current = null; streamRef.current?.getTracks().forEach((mediaTrack) => mediaTrack.stop());
+    workletRef.current?.disconnect(); silentGainRef.current?.disconnect();
+    for (const pending of snapshotRequestsRef.current.values()) { window.clearTimeout(pending.timeout); pending.reject(new Error("Listening stopped.")); }
+    snapshotRequestsRef.current.clear(); recognitionGateRef.current.cancel();
+    streamRef.current = null; analyserRef.current = null; workletRef.current = null; silentGainRef.current = null;
+    frequencyDataRef.current = null; waveformDataRef.current = null; void audioContextRef.current?.close(); audioContextRef.current = null;
+    if (listeningModeRef.current === "vinyl") { resetVinylPrediction(); lastTrackKeyRef.current = ""; }
+    setStatus("Listen mode paused.");
+  }
+
+  function chooseListeningMode(mode: ListeningMode) {
+    if (listeningRef.current) return;
+    listeningModeRef.current = mode;
+    setListeningMode(mode);
+    if (mode === "live") resetVinylPrediction();
+    setStatus(mode === "vinyl"
+      ? "Vinyl mode will identify once, learn the album order, and prepare each transition."
+      : "Live mode reacts to whatever you play.");
+  }
+
+  function chooseArtCuration(enabled: boolean) {
+    if (listeningRef.current) return;
+    artCurationEnabledRef.current = enabled;
+    setArtCurationEnabled(enabled);
+    setStatus(enabled
+      ? "Artwork curation is on — each recognized track will receive a visual pairing."
+      : "Artwork curation is off — Vinyl Mode will show track and album information only.");
+  }
+
+  async function play() { setCurrentTrack(fixtureTrack); try { await presentTrack(fixtureTrack); } catch (error) { setStatus(error instanceof Error ? error.message : "Artwork selection is unavailable."); } }
+  const listenControl = <button className="listen-control" onClick={isListening ? stopListenMode : startListenMode}>{isListening ? "Pause listening" : listeningMode === "vinyl" ? "Start vinyl mode" : "Start live mode"}</button>;
+  const microphonePicker = <label className="microphone-picker"><span>Microphone</span><select value={selectedDeviceId} onChange={(event) => setSelectedDeviceId(event.target.value)} disabled={isListening}><option value="">System default</option>{audioInputs.map((input) => <option key={input.deviceId} value={input.deviceId}>{input.label}</option>)}</select></label>;
+  const modePicker = <div className="mode-picker" role="group" aria-label="Listening mode"><button type="button" className={listeningMode === "live" ? "is-active" : ""} onClick={() => chooseListeningMode("live")} disabled={isListening}><strong>Live</strong><span>Follow anything you play</span></button><button type="button" className={listeningMode === "vinyl" ? "is-active" : ""} onClick={() => chooseListeningMode("vinyl")} disabled={isListening}><strong>Vinyl</strong><span>Predict the album sequence</span></button></div>;
+  const curationPicker = <div className="curation-picker" role="group" aria-label="Artwork curation"><button type="button" className={artCurationEnabled ? "is-active" : ""} onClick={() => chooseArtCuration(true)} disabled={isListening}>Art curation on</button><button type="button" className={!artCurationEnabled ? "is-active" : ""} onClick={() => chooseArtCuration(false)} disabled={isListening}>Music info only</button></div>;
+  const modeBadge = listeningMode === "vinyl" && vinylQueueLabel ? <aside className="vinyl-badge"><span>Vinyl mode</span><strong>{vinylQueueLabel}</strong></aside> : null;
+  const vinylSeconds = vinylBoundaryAtRef.current ? Math.round((vinylBoundaryAtRef.current - Date.now()) / 1000) : undefined;
+  const debugPanel = showAudioDebug ? <aside className="audio-debug" aria-label="Audio detector diagnostics"><strong>{audioDebug.state}</strong><span>{listeningMode}</span>{activeMicrophone && <span>{activeMicrophone}</span>}<span>change {audioDebug.score.toFixed(3)}</span><span>rms {audioDebug.rms.toFixed(3)}</span><span>AudD calls {auddCalls}</span>{vinylSeconds !== undefined && <span>next {vinylSeconds}s</span>}<span>{audioDebug.reason}</span>{captureDebug && <span>{captureDebug}</span>}{lastSampleUrl && <a href={lastSampleUrl} download="music-art-last-sample.wav" onClick={(event) => event.stopPropagation()}>download sample</a>}</aside> : null;
+  const transitionLabel = recognitionPhase === "suspected" ? "Possible new song" : recognitionPhase === "checking" ? "Identifying new song" : "New selection found";
+  const vinylSequenceIsActive = listeningMode === "vinyl" && Boolean(vinylAlbumRef.current);
+  const transitionIndicator = !vinylSequenceIsActive && (recognitionPhase === "suspected" || recognitionPhase === "checking" || recognitionPhase === "matched") ? <aside className="transition-indicator" data-phase={recognitionPhase} aria-live="polite"><span className="signal-bars" aria-hidden="true"><i /><i /><i /><i /></span><span><small>{recognitionPhase === "suspected" ? "Listening closely" : recognitionPhase === "checking" ? "Checking the sound" : "Now playing"}</small><strong>{transitionLabel}</strong></span></aside> : null;
+
+  if (act === "ready") return <main className="ready"><p className="eyebrow">Music Art</p><h1>{hasLiveTrack ? "Listen again" : "Listen and identify"}</h1><p>{hasLiveTrack ? `Last identified: ${currentTrack.title} — ${currentTrack.artist}` : listeningMode === "vinyl" ? "Identify the record once, then let the album unfold." : "Identify a song, then discover a matching artwork."}</p>{modePicker}{curationPicker}{microphonePicker}{listenControl}<button onClick={play}>Replay Pink Moon fixture</button><small>{status}</small>{transitionIndicator}{debugPanel}</main>;
+  if (act === "track" || act === "handoff") return <main className={`track-screen${act === "handoff" ? " is-handing-off" : ""}`}>{act === "handoff" && <div className="handoff-art" aria-hidden="true"><img className="handoff-backdrop" src={art.image} alt="" /><img className="handoff-image" src={art.image} alt="" /></div>}<div className="frame" key={trackKey(currentTrack)}><section className="album-panel"><div className="album-mat"><div className={`album-cover${currentTrack.albumCover ? "" : " is-missing"}`} style={{ backgroundImage: currentTrack.albumCover ? `url(${currentTrack.albumCover})` : undefined }} role="img" aria-label={currentTrack.albumCover ? `${currentTrack.album} album artwork` : "Album artwork unavailable"}>{!currentTrack.albumCover && <span>{currentTrack.album.slice(0, 1)}</span>}</div></div></section><section className="now-playing"><p className="eyebrow now-label"><span />Now playing</p><h1 className={`artist-name${currentTrack.artist.length > 20 ? " is-long" : ""}`}>{currentTrack.artist}</h1><h2 className={`song-title${currentTrack.title.length > 26 ? " is-long" : ""}`}>{currentTrack.title}</h2><div className="album-details"><p className="field-label">From the album</p><p className="album-name"><em>{currentTrack.album}</em><span className="release-year"> · {currentTrack.year}</span></p></div><p className="curation-status">{status}</p></section></div>{modeBadge}{transitionIndicator}{debugPanel}</main>;
+  if (act === "art" || act === "art-fade") return <main className={`art-intro${act === "art-fade" ? " is-info-fading" : ""}`} style={{ width: "min(100vw, calc(100vh * 16 / 9))", height: "min(100vh, calc(100vw * 9 / 16))", minHeight: 0, margin: "auto", aspectRatio: "16 / 9" }}><img className="art-image" style={{ position: "absolute", zIndex: 0, inset: "-3%", width: "106%", height: "106%", filter: "blur(26px) brightness(.38)", transform: "scale(1.06)" }} src={art.image} alt="" /><img className="art-image" style={{ position: "absolute", zIndex: 1, inset: 0, objectFit: "contain" }} src={art.image} alt="" /><div className="art-overlay" style={{ zIndex: 2 }} /><section style={{ zIndex: 3 }}><p className="eyebrow">Selected artwork</p><h1 className={`art-title${art.title.length > 34 ? " is-long" : ""}`}><em>{art.title}</em></h1><h2>{art.artist}</h2><p>{art.date} · {art.museum}</p></section>{modeBadge}{transitionIndicator}{debugPanel}</main>;
+  return <main className="gallery" style={{ width: "min(100vw, calc(100vh * 16 / 9))", height: "min(100vh, calc(100vw * 9 / 16))", minHeight: 0, margin: "auto", aspectRatio: "16 / 9" }} onClick={() => setAct("ready")} aria-label={`${art.title} by ${art.artist}`}><img className="art-image" style={{ position: "absolute", zIndex: 0, inset: "-3%", width: "106%", height: "106%", filter: "blur(26px) brightness(.38)", transform: "scale(1.06)" }} src={art.image} alt="" /><img className="art-image" style={{ position: "absolute", zIndex: 1, inset: 0, objectFit: "contain" }} src={art.image} alt={`${art.title} by ${art.artist}`} />{modeBadge}{transitionIndicator}{debugPanel}</main>;
+}
