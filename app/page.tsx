@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { AudioChangeDetector, rmsFromSamples, spectrumBandsFromDb, type DetectorState } from "./lib/audio-change-detector";
 import { canonicalTrackKey, INITIAL_DISCOVERY_CAPTURE_MS, noMatchRetryDelay, RecognitionGate } from "./lib/recognition";
+import { planVinylHeartbeats } from "./lib/vinyl-heartbeats";
 import { isNearVinylBoundary, remainingTrackMs, shiftedBoundaryAfterPause } from "./lib/vinyl-mode";
 import { encodeMonoWav, prepareRecognitionAudio } from "./lib/wav";
 
@@ -11,7 +12,7 @@ type ListeningMode = "live" | "vinyl";
 type AudioInput = { deviceId: string; label: string };
 type Artwork = { title: string; artist: string; date: string; museum: string; image: string; rationale: string };
 type Track = { artist: string; title: string; album: string; year: string; albumCover?: string; isrc?: string; durationMs?: number; timecodeMs?: number; collectionId?: number; trackNumber?: number; discNumber?: number };
-type RecognitionReason = "music-started" | "music-resumed" | "spectral-change" | "expected-ending" | "safety-check" | "legacy-fallback";
+type RecognitionReason = "music-started" | "music-resumed" | "spectral-change" | "expected-ending" | "safety-check" | "heartbeat" | "pre-transition" | "transition-confirmation" | "legacy-fallback";
 type RingSnapshot = { samples: Float32Array; sampleRate: number };
 type SnapshotRequest = { resolve: (snapshot: RingSnapshot) => void; reject: (error: Error) => void; timeout: number };
 type AudioDebug = { state: DetectorState; score: number; rms: number; reason: string };
@@ -36,6 +37,7 @@ const ART_INFO_FADE_MS = 3500;
 const ART_TO_TRACK_DISSOLVE_MS = 3200;
 const CURATION_CACHE_VERSION = "v5-comparative-curation";
 const VINYL_TIMER_VERIFY_MS = 12_000;
+const EARLY_TRANSITION_CONFIRM_DELAY_MS = 5_000;
 
 function trackKey(track: Track) { return canonicalTrackKey(track); }
 
@@ -46,6 +48,10 @@ function timecodeToMs(timecode?: string): number | undefined {
   if (parts.length === 2) return (parts[0] * 60 + parts[1]) * 1000;
   if (parts.length === 3) return (parts[0] * 3600 + parts[1] * 60 + parts[2]) * 1000;
   return undefined;
+}
+
+function isQuietTimingCheck(reason: RecognitionReason) {
+  return reason === "heartbeat" || reason === "pre-transition";
 }
 
 export default function Home() {
@@ -101,6 +107,9 @@ export default function Home() {
   const vinylGapPendingRef = useRef(false);
   const vinylAdvanceInFlightRef = useRef(false);
   const vinylPreloadRef = useRef<{ key: string; promise: Promise<Artwork> } | null>(null);
+  const vinylMidpointHeartbeatAtRef = useRef(0);
+  const vinylPreTransitionHeartbeatAtRef = useRef(0);
+  const vinylEarlyConfirmationTimerRef = useRef<number | null>(null);
   const previousDetectorStateRef = useRef<DetectorState>("warming");
   const hasLiveTrack = currentTrack !== fixtureTrack;
 
@@ -189,6 +198,10 @@ export default function Home() {
     vinylGapPendingRef.current = false;
     vinylAdvanceInFlightRef.current = false;
     vinylPreloadRef.current = null;
+    vinylMidpointHeartbeatAtRef.current = 0;
+    vinylPreTransitionHeartbeatAtRef.current = 0;
+    if (vinylEarlyConfirmationTimerRef.current) window.clearTimeout(vinylEarlyConfirmationTimerRef.current);
+    vinylEarlyConfirmationTimerRef.current = null;
     setVinylQueueLabel("");
   }
 
@@ -201,6 +214,12 @@ export default function Home() {
     const sideNumber = current?.discNumber ?? 0;
     const sideLabel = sideNumber > 0 && sideNumber <= 26 ? `Side ${String.fromCharCode(64 + sideNumber)} · ` : "";
     setVinylQueueLabel(`${sideLabel}${trackNumber} / ${totalTracks}`);
+  }
+
+  function scheduleVinylHeartbeats() {
+    const plan = planVinylHeartbeats(Date.now(), vinylBoundaryAtRef.current);
+    vinylMidpointHeartbeatAtRef.current = plan.midpointAt;
+    vinylPreTransitionHeartbeatAtRef.current = plan.preTransitionAt;
   }
 
   function anchorVinylSequence(result: Record<string, unknown>, recognizedTrack: Track, capturedAt: number) {
@@ -227,6 +246,7 @@ export default function Home() {
     vinylPauseAtRef.current = 0;
     vinylGapPendingRef.current = false;
     nextFallbackAtRef.current = 0;
+    scheduleVinylHeartbeats();
     updateVinylQueueLabel();
     return true;
   }
@@ -256,6 +276,8 @@ export default function Home() {
     const next = album.tracks[nextIndex];
     if (!next) {
       vinylBoundaryAtRef.current = 0;
+      vinylMidpointHeartbeatAtRef.current = 0;
+      vinylPreTransitionHeartbeatAtRef.current = 0;
       setVinylQueueLabel("Album complete · waiting for another record");
       setStatus("The album sequence is complete — listening for the next record.");
       return false;
@@ -266,6 +288,9 @@ export default function Home() {
     vinylBoundaryAtRef.current = next.durationMs ? Date.now() + next.durationMs : 0;
     vinylPauseAtRef.current = 0;
     vinylGapPendingRef.current = false;
+    if (vinylEarlyConfirmationTimerRef.current) window.clearTimeout(vinylEarlyConfirmationTimerRef.current);
+    vinylEarlyConfirmationTimerRef.current = null;
+    scheduleVinylHeartbeats();
     lastTrackKeyRef.current = trackKey(next);
     updateVinylQueueLabel();
     changeRecognitionPhase("matched");
@@ -295,9 +320,9 @@ export default function Home() {
     nextFallbackReasonRef.current = delay < SAFETY_CHECK_MS ? "expected-ending" : "safety-check";
   }
 
-  async function identifyRecording(audio: Blob, capturedAt = Date.now()): Promise<RecognitionOutcome> {
+  async function identifyRecording(audio: Blob, capturedAt = Date.now(), reason?: RecognitionReason): Promise<RecognitionOutcome> {
     try {
-      setStatus("Identifying the music…");
+      if (!reason || !isQuietTimingCheck(reason)) setStatus("Identifying the music…");
       setAuddCalls((count) => count + 1);
       const extension = audio.type.includes("wav") ? "wav" : audio.type.includes("mp4") ? "m4a" : "webm";
       const form = new FormData(); form.append("audio", audio, `capture.${extension}`); form.append("mode", listeningModeRef.current);
@@ -308,7 +333,7 @@ export default function Home() {
         return "error";
       }
       if (!data.result) {
-        setStatus(listeningRef.current ? "No confident match yet — still listening…" : "No match found.");
+        if (!reason || !isQuietTimingCheck(reason)) setStatus(listeningRef.current ? "No confident match yet — still listening…" : "No match found.");
         return "none";
       }
       const track: Track = {
@@ -340,7 +365,7 @@ export default function Home() {
       void presentation.catch((error) => setStatus(error instanceof Error ? error.message : "Artwork selection is unavailable."));
       return "match";
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Music identification failed.");
+      if (!reason || !isQuietTimingCheck(reason)) setStatus(error instanceof Error ? error.message : "Music identification failed.");
       return "none";
     }
   }
@@ -394,7 +419,7 @@ export default function Home() {
     recorder.onstop = () => {
       recordingRef.current = false;
       if (!chunks.length) { recognitionGateRef.current.cancel(); return; }
-      void identifyRecording(new Blob(chunks, { type: recorder.mimeType || "audio/webm" }), Date.now()).then((outcome) => finishRecognition(outcome, reason));
+      void identifyRecording(new Blob(chunks, { type: recorder.mimeType || "audio/webm" }), Date.now(), reason).then((outcome) => finishRecognition(outcome, reason));
     };
     recorder.start(); setStatus("Listening to confirm the song…");
     window.setTimeout(() => { if (recorder.state === "recording") recorder.stop(); }, SAMPLE_MS);
@@ -409,12 +434,13 @@ export default function Home() {
     setAudioDebug((debug) => ({ ...debug, reason }));
     if (!workletRef.current) { captureLegacySample("legacy-fallback"); return; }
     try {
-      setStatus("Checking the song…");
+      if (!isQuietTimingCheck(reason)) setStatus("Checking the song…");
       // After a real gap, exclude the preceding track from the upload. Five
       // post-gap seconds are enough for AudD and avoid a mixed-song sample.
       const discoveryRetry = listeningModeRef.current === "vinyl" && !lastTrackKeyRef.current && consecutiveNoMatchRef.current > 0;
       const discoveryRetrySeconds = discoveryRetry ? 24 : SNAPSHOT_SECONDS;
-      const snapshot = await takeRingSnapshot(reason === "music-resumed" ? 5 : discoveryRetrySeconds);
+      const snapshotSeconds = reason === "transition-confirmation" ? 10 : reason === "music-resumed" ? 5 : discoveryRetrySeconds;
+      const snapshot = await takeRingSnapshot(snapshotSeconds);
       const capturedAt = Date.now();
       if (snapshot.samples.length < snapshot.sampleRate * 4) throw new Error("Waiting for a longer music sample.");
       const prepared = prepareRecognitionAudio(snapshot.samples, snapshot.sampleRate, discoveryRetry);
@@ -426,7 +452,7 @@ export default function Home() {
         lastSampleUrlRef.current = sampleUrl;
         setLastSampleUrl(sampleUrl);
       }
-      const outcome = await identifyRecording(audio, capturedAt);
+      const outcome = await identifyRecording(audio, capturedAt, reason);
       finishRecognition(outcome, reason);
     } catch (error) {
       recognitionGateRef.current.finish(Date.now(), NO_MATCH_COOLDOWN_MS);
@@ -480,9 +506,21 @@ export default function Home() {
         if (vinylMode && previousDetectorStateRef.current === "silence" && update.state === "resuming") {
           if (vinylGapPendingRef.current) void advanceVinyl("gap");
           else if (vinylPauseAtRef.current) {
-            vinylBoundaryAtRef.current = shiftedBoundaryAfterPause(vinylBoundaryAtRef.current, vinylPauseAtRef.current, wallNow);
+            const pauseStartedAt = vinylPauseAtRef.current;
             vinylPauseAtRef.current = 0;
-            setStatus("Playback resumed — record timing restored.");
+            // A clean new music bed far from the predicted boundary is more
+            // likely a skipped/early track than a brief room-level dropout.
+            // Give it five seconds to become a clean 10-second fingerprint,
+            // then let AudD decide whether to re-anchor the sequence.
+            if (!isNearVinylBoundary(vinylBoundaryAtRef.current, wallNow) && !vinylEarlyConfirmationTimerRef.current) {
+              vinylEarlyConfirmationTimerRef.current = window.setTimeout(() => {
+                vinylEarlyConfirmationTimerRef.current = null;
+                void requestRecognition("transition-confirmation");
+              }, EARLY_TRANSITION_CONFIRM_DELAY_MS);
+            } else {
+              vinylBoundaryAtRef.current = shiftedBoundaryAfterPause(vinylBoundaryAtRef.current, pauseStartedAt, wallNow);
+              scheduleVinylHeartbeats();
+            }
           }
         }
         if (USE_AUDIO_CHANGE_DETECTOR && update.event === "music-started") void requestRecognition("music-started");
@@ -494,6 +532,15 @@ export default function Home() {
         if (vinylMode && vinylAlbumRef.current && vinylBoundaryAtRef.current > 0
           && wallNow >= vinylBoundaryAtRef.current && update.state !== "silence" && !vinylPauseAtRef.current) {
           void advanceVinyl("timer");
+        }
+        if (predictiveVinyl && !vinylAdvanceInFlightRef.current) {
+          if (vinylMidpointHeartbeatAtRef.current > 0 && wallNow >= vinylMidpointHeartbeatAtRef.current) {
+            vinylMidpointHeartbeatAtRef.current = 0;
+            void requestRecognition("heartbeat");
+          } else if (vinylPreTransitionHeartbeatAtRef.current > 0 && wallNow >= vinylPreTransitionHeartbeatAtRef.current) {
+            vinylPreTransitionHeartbeatAtRef.current = 0;
+            void requestRecognition("pre-transition");
+          }
         }
         previousDetectorStateRef.current = update.state;
       }
@@ -598,7 +645,9 @@ export default function Home() {
   const curationPicker = <div className="curation-picker" role="group" aria-label="Artwork curation"><button type="button" className={artCurationEnabled ? "is-active" : ""} onClick={() => chooseArtCuration(true)} disabled={isListening}>Art curation on</button><button type="button" className={!artCurationEnabled ? "is-active" : ""} onClick={() => chooseArtCuration(false)} disabled={isListening}>Music info only</button></div>;
   const modeBadge = listeningMode === "vinyl" && vinylQueueLabel ? <aside className="vinyl-badge"><span>Vinyl mode</span><strong>{vinylQueueLabel}</strong></aside> : null;
   const vinylSeconds = vinylBoundaryAtRef.current ? Math.round((vinylBoundaryAtRef.current - Date.now()) / 1000) : undefined;
-  const debugPanel = showAudioDebug ? <aside className="audio-debug" aria-label="Audio detector diagnostics"><strong>{audioDebug.state}</strong><span>{listeningMode}</span>{activeMicrophone && <span>{activeMicrophone}</span>}<span>change {audioDebug.score.toFixed(3)}</span><span>rms {audioDebug.rms.toFixed(3)}</span><span>AudD calls {auddCalls}</span>{vinylSeconds !== undefined && <span>next {vinylSeconds}s</span>}<span>{audioDebug.reason}</span>{captureDebug && <span>{captureDebug}</span>}{lastSampleUrl && <a href={lastSampleUrl} download="music-art-last-sample.wav" onClick={(event) => event.stopPropagation()}>download sample</a>}</aside> : null;
+  const nextVinylHeartbeatAt = [vinylMidpointHeartbeatAtRef.current, vinylPreTransitionHeartbeatAtRef.current].filter((at) => at > 0).sort((left, right) => left - right)[0];
+  const vinylHeartbeatSeconds = nextVinylHeartbeatAt ? Math.max(0, Math.round((nextVinylHeartbeatAt - Date.now()) / 1000)) : undefined;
+  const debugPanel = showAudioDebug ? <aside className="audio-debug" aria-label="Audio detector diagnostics"><strong>{audioDebug.state}</strong><span>{listeningMode}</span>{activeMicrophone && <span>{activeMicrophone}</span>}<span>change {audioDebug.score.toFixed(3)}</span><span>rms {audioDebug.rms.toFixed(3)}</span><span>AudD calls {auddCalls}</span>{vinylSeconds !== undefined && <span>next {vinylSeconds}s</span>}{vinylHeartbeatSeconds !== undefined && <span>heartbeat {vinylHeartbeatSeconds}s</span>}<span>{audioDebug.reason}</span>{captureDebug && <span>{captureDebug}</span>}{lastSampleUrl && <a href={lastSampleUrl} download="music-art-last-sample.wav" onClick={(event) => event.stopPropagation()}>download sample</a>}</aside> : null;
   const transitionLabel = recognitionPhase === "suspected" ? "Possible new song" : recognitionPhase === "checking" ? "Identifying new song" : "New selection found";
   const vinylSequenceIsActive = listeningMode === "vinyl" && Boolean(vinylAlbumRef.current);
   const transitionIndicator = !vinylSequenceIsActive && (recognitionPhase === "suspected" || recognitionPhase === "checking" || recognitionPhase === "matched") ? <aside className="transition-indicator" data-phase={recognitionPhase} aria-live="polite"><span className="signal-bars" aria-hidden="true"><i /><i /><i /><i /></span><span><small>{recognitionPhase === "suspected" ? "Listening closely" : recognitionPhase === "checking" ? "Checking the sound" : "Now playing"}</small><strong>{transitionLabel}</strong></span></aside> : null;
