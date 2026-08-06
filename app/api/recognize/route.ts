@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { largeAlbumArtwork, orderedCatalogAlbum, selectCatalogTrack, type CatalogTrack } from "../../lib/track-metadata";
+import { pickGenreLabel } from "../../lib/visual-brief";
 
 const MAX_CAPTURE_BYTES = 3_000_000;
 const MIN_CAPTURE_BYTES = 8_000;
@@ -98,6 +99,9 @@ export async function POST(request: Request) {
     const title = text(result.title) ?? "Unknown track";
     const appleTrackId = text(apple.id) ?? text(playParams.id);
     const preferredAlbum = text(apple.albumName) ?? text(result.album);
+    const appleGenres = Array.isArray(apple.genreNames)
+      ? apple.genreNames.filter((item): item is string => typeof item === "string")
+      : [];
     const [catalogById, catalogCandidates] = await Promise.all([
       catalogTrackById(appleTrackId),
       catalogSearch(artist, title),
@@ -108,6 +112,7 @@ export async function POST(request: Request) {
       [...(catalogById ? [catalogById] : []), ...catalogCandidates],
       preferredAlbum,
     );
+    const genre = pickGenreLabel(appleGenres[0], appleGenres[1], catalog?.primaryGenreName, catalogById?.primaryGenreName);
     const discoveredAlbumTracks = vinylMode && catalog?.collectionId ? await catalogAlbum(catalog.collectionId) : [];
     // A one-track result is generally a single, not a usable vinyl sequence. Keep
     // recognition live in that case instead of falsely locking at “Track 1 of 1”.
@@ -126,6 +131,7 @@ export async function POST(request: Request) {
       collectionId: track.collectionId,
       trackNumber: track.trackNumber,
       discNumber: track.discNumber,
+      genre,
     }));
     console.info(`[recognize] mode=${vinylMode ? "vinyl" : "live"} catalog=${catalog?.collectionId ?? "none"} sequence=${albumSequence.length} index=${sequenceIndex}`);
     return NextResponse.json({
@@ -141,6 +147,7 @@ export async function POST(request: Request) {
         collectionId: catalog?.collectionId,
         trackNumber: catalog?.trackNumber,
         discNumber: catalog?.discNumber,
+        genre,
         albumSequence,
         sequenceIndex: sequenceIndex >= 0 ? sequenceIndex : undefined,
       },

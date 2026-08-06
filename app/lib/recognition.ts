@@ -6,9 +6,14 @@ function canonical(value: string) {
   return value.normalize("NFKD").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
 
+/** Stable artist|title key — ignores ISRC so vinyl album tracks match AudD results. */
+export function textTrackKey(track: TrackIdentity): string {
+  return `text:${canonical(track.artist)}|${canonical(track.title)}`;
+}
+
 export function canonicalTrackKey(track: TrackIdentity): string {
   const isrc = track.isrc?.trim().toUpperCase();
-  return isrc ? `isrc:${isrc}` : `text:${canonical(track.artist)}|${canonical(track.title)}`;
+  return isrc ? `isrc:${isrc}` : textTrackKey(track);
 }
 
 export function noMatchRetryDelay(

@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { isNearVinylBoundary, remainingTrackMs, shiftedBoundaryAfterPause, timecodeAtCaptureMs } from "./vinyl-mode";
+import {
+  isNearVinylBoundary,
+  refinedVinylBoundaryAt,
+  remainingTrackMs,
+  shiftedBoundaryAfterPause,
+  timecodeAtCaptureMs,
+} from "./vinyl-mode";
 
 describe("vinyl timing", () => {
   it("uses recognition timecode to estimate the remaining track", () => {
@@ -21,5 +27,11 @@ describe("vinyl timing", () => {
 
   it("freezes the predicted ending during a mid-track pause", () => {
     expect(shiftedBoundaryAfterPause(100_000, 40_000, 55_000)).toBe(115_000);
+  });
+
+  it("accepts small heartbeat boundary corrections and rejects large jumps", () => {
+    expect(refinedVinylBoundaryAt(100_000, 112_000)).toBe(112_000);
+    expect(refinedVinylBoundaryAt(100_000, 130_000)).toBe(100_000);
+    expect(refinedVinylBoundaryAt(0, 100_000)).toBe(100_000);
   });
 });

@@ -13,9 +13,15 @@ export type CatalogTrack = {
   discNumber?: number;
   discCount?: number;
   trackTimeMillis?: number;
+  primaryGenreName?: string;
 };
 
 const COMPILATION_TERMS = /\b(best of|collection|compilation|essential|greatest|hits|samples|soundtrack|various|dj mix)\b/i;
+const SINGLE_RELEASE = /-\s*single\b/i;
+
+function isSingleRelease(track: CatalogTrack) {
+  return track.trackCount === 1 || SINGLE_RELEASE.test(track.collectionName ?? "");
+}
 
 function normalize(value: string | undefined) {
   return (value ?? "")
@@ -53,9 +59,9 @@ export function selectCatalogTrack(artist: string, title: string, tracks: Catalo
     // AudD/Apple can point to a same-title single even when the recognized song belongs
     // to an album. Prefer an explicitly matching album and, absent that, an album release
     // with a real track list. This makes Vinyl Mode useful without changing live matching.
-    const preferredAlbumBonus = wantedAlbum && normalize(track.collectionName) === wantedAlbum ? 80 : 0;
+    const preferredAlbumBonus = wantedAlbum && !isSingleRelease(track) && normalize(track.collectionName) === wantedAlbum ? 80 : 0;
     const albumLengthBonus = Math.min(12, Math.max(0, (track.trackCount ?? 1) - 1));
-    const singlePenalty = track.trackCount === 1 ? 24 : 0;
+    const singlePenalty = isSingleRelease(track) ? 24 : 0;
     const score = artistScore + titleScore + preferredAlbumBonus + albumLengthBonus - compilationPenalty - singlePenalty;
     if (!best || score > best.score) best = { track, score };
   }
