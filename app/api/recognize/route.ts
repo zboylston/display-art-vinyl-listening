@@ -13,7 +13,7 @@ function text(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
-async function catalogMatch(artist: string, title: string) {
+async function catalogSearch(artist: string, title: string): Promise<CatalogTrack[]> {
   try {
     const url = new URL("https://itunes.apple.com/search");
     url.searchParams.set("term", `${artist} ${title}`);
@@ -22,11 +22,11 @@ async function catalogMatch(artist: string, title: string) {
     url.searchParams.set("country", "US");
     url.searchParams.set("limit", "20");
     const response = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(6000) });
-    if (!response.ok) return undefined;
+    if (!response.ok) return [];
     const data = await response.json() as { results?: CatalogTrack[] };
-    return selectCatalogTrack(artist, title, data.results ?? []);
+    return data.results ?? [];
   } catch {
-    return undefined;
+    return [];
   }
 }
 
@@ -97,8 +97,21 @@ export async function POST(request: Request) {
     const artist = text(result.artist) ?? "Unknown artist";
     const title = text(result.title) ?? "Unknown track";
     const appleTrackId = text(apple.id) ?? text(playParams.id);
-    const catalog = await catalogTrackById(appleTrackId) ?? await catalogMatch(artist, title);
-    const albumTracks = vinylMode && catalog?.collectionId ? await catalogAlbum(catalog.collectionId) : [];
+    const preferredAlbum = text(apple.albumName) ?? text(result.album);
+    const [catalogById, catalogCandidates] = await Promise.all([
+      catalogTrackById(appleTrackId),
+      catalogSearch(artist, title),
+    ]);
+    const catalog = selectCatalogTrack(
+      artist,
+      title,
+      [...(catalogById ? [catalogById] : []), ...catalogCandidates],
+      preferredAlbum,
+    );
+    const discoveredAlbumTracks = vinylMode && catalog?.collectionId ? await catalogAlbum(catalog.collectionId) : [];
+    // A one-track result is generally a single, not a usable vinyl sequence. Keep
+    // recognition live in that case instead of falsely locking at “Track 1 of 1”.
+    const albumTracks = discoveredAlbumTracks.length > 1 ? discoveredAlbumTracks : [];
     const sequenceIndex = albumTracks.findIndex((track) => (
       (Boolean(catalog?.trackId) && track.trackId === catalog?.trackId)
       || (Boolean(catalog) && track.trackName === catalog?.trackName && track.artistName === catalog?.artistName)

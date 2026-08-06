@@ -23,6 +23,15 @@ describe("selectCatalogTrack", () => {
       { artistName: "John Mayer", trackName: "Paper Doll", collectionName: "Paradise Valley", collectionId: 123 },
     ])?.collectionId).toBe(123);
   });
+
+  it("prefers the full album over a same-title single for Vinyl Mode", () => {
+    const candidates = [
+      { artistName: "Hiss Golden Messenger", trackName: "In the Middle of It", collectionName: "In the Middle of It - Single", collectionId: 1, trackCount: 1 },
+      { artistName: "Hiss Golden Messenger", trackName: "In the Middle of It", collectionName: "I'm People", collectionId: 2, trackCount: 12 },
+    ];
+    expect(selectCatalogTrack("Hiss Golden Messenger", "In the Middle of It", candidates, "I'm People")?.collectionId).toBe(2);
+    expect(selectCatalogTrack("Hiss Golden Messenger", "In the Middle of It", candidates)?.collectionId).toBe(2);
+  });
 });
 
 describe("largeAlbumArtwork", () => {

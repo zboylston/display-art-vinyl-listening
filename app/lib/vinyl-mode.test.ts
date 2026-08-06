@@ -1,10 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { isNearVinylBoundary, remainingTrackMs, shiftedBoundaryAfterPause } from "./vinyl-mode";
+import { isNearVinylBoundary, remainingTrackMs, shiftedBoundaryAfterPause, timecodeAtCaptureMs } from "./vinyl-mode";
 
 describe("vinyl timing", () => {
   it("uses recognition timecode to estimate the remaining track", () => {
     expect(remainingTrackMs(180_000, 25_000)).toBe(155_000);
     expect(remainingTrackMs(undefined, 25_000)).toBeUndefined();
+  });
+
+  it("advances a rolling capture's timecode to the live playback position", () => {
+    expect(timecodeAtCaptureMs(85_000, 15_000, 700)).toBe(100_700);
+    expect(timecodeAtCaptureMs(undefined, 15_000, 700)).toBeUndefined();
   });
 
   it("only treats changes close to the predicted ending as album progression", () => {
