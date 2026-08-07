@@ -37,6 +37,13 @@ export class RecognitionGate {
     return true;
   }
 
+  /** Vinyl post-advance verifies must not wait out a prior heartbeat cooldown. */
+  tryStartForced(): boolean {
+    if (this.inFlight) return false;
+    this.inFlight = true;
+    return true;
+  }
+
   finish(at: number, cooldownMs: number) {
     this.inFlight = false;
     this.cooldownUntil = at + cooldownMs;

@@ -48,6 +48,87 @@ describe("selectCatalogTrack", () => {
     ];
     expect(selectCatalogTrack("Hiss Golden Messenger", "In the Middle of It", candidates, "Shaky Eyes - Single")?.collectionId).toBe(2);
   });
+
+  it("vinyl discovery prefers the album where the song is disc 1 / track 1", () => {
+    const candidates = [
+      {
+        artistName: "Herbie Hancock",
+        trackName: "Maiden Voyage",
+        collectionName: "The Complete Blue Note Sixties Sessions",
+        collectionId: 1,
+        trackNumber: 8,
+        discNumber: 3,
+        trackCount: 60,
+      },
+      {
+        artistName: "Herbie Hancock",
+        trackName: "Maiden Voyage",
+        collectionName: "Maiden Voyage",
+        collectionId: 2,
+        trackNumber: 1,
+        discNumber: 1,
+        trackCount: 5,
+      },
+    ];
+    expect(selectCatalogTrack("Herbie Hancock", "Maiden Voyage", candidates, {
+      preferredAlbum: "The Complete Blue Note Sixties Sessions",
+      preferAlbumOpener: true,
+    })?.collectionId).toBe(2);
+  });
+
+  it("live matching does not assume the song is track 1", () => {
+    const candidates = [
+      {
+        artistName: "Herbie Hancock",
+        trackName: "Maiden Voyage",
+        collectionName: "The Complete Blue Note Sixties Sessions",
+        collectionId: 1,
+        trackNumber: 8,
+        discNumber: 3,
+        trackCount: 60,
+      },
+      {
+        artistName: "Herbie Hancock",
+        trackName: "Maiden Voyage",
+        collectionName: "Maiden Voyage",
+        collectionId: 2,
+        trackNumber: 1,
+        discNumber: 1,
+        trackCount: 5,
+      },
+    ];
+    // Without preferAlbumOpener, AudD's preferred album can still win.
+    expect(selectCatalogTrack("Herbie Hancock", "Maiden Voyage", candidates, {
+      preferredAlbum: "The Complete Blue Note Sixties Sessions",
+    })?.collectionId).toBe(1);
+  });
+
+  it("penalizes non-openers even when AudD prefers that album", () => {
+    const candidates = [
+      {
+        artistName: "Herbie Hancock",
+        trackName: "Maiden Voyage",
+        collectionName: "Empyrean Isles",
+        collectionId: 9,
+        trackNumber: 4,
+        discNumber: 1,
+        trackCount: 4,
+      },
+      {
+        artistName: "Herbie Hancock",
+        trackName: "Maiden Voyage",
+        collectionName: "Maiden Voyage",
+        collectionId: 2,
+        trackNumber: 1,
+        discNumber: 1,
+        trackCount: 5,
+      },
+    ];
+    expect(selectCatalogTrack("Herbie Hancock", "Maiden Voyage", candidates, {
+      preferredAlbum: "Empyrean Isles",
+      preferAlbumOpener: true,
+    })?.collectionId).toBe(2);
+  });
 });
 
 describe("largeAlbumArtwork", () => {

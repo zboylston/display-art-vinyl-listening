@@ -16,11 +16,22 @@ export type CatalogTrack = {
   primaryGenreName?: string;
 };
 
-const COMPILATION_TERMS = /\b(best of|collection|compilation|essential|greatest|hits|samples|soundtrack|various|dj mix)\b/i;
+const COMPILATION_TERMS = /\b(best of|box\s*set|collection|compilation|complete|essential|greatest|hits|anthology|remasters?|samples|sessions|soundtrack|various|dj mix)\b/i;
 const SINGLE_RELEASE = /-\s*single\b/i;
+
+export type SelectCatalogOptions = {
+  preferredAlbum?: string;
+  /** Vinyl discovery: the first ID is assumed to be side A / track 1. */
+  preferAlbumOpener?: boolean;
+};
 
 function isSingleRelease(track: CatalogTrack) {
   return track.trackCount === 1 || SINGLE_RELEASE.test(track.collectionName ?? "");
+}
+
+/** Disc 1 / track 1 — the usual place a needle drops when Vinyl Mode starts. */
+export function isAlbumOpener(track: CatalogTrack) {
+  return (track.trackNumber ?? 0) === 1 && (track.discNumber ?? 1) === 1;
 }
 
 function normalize(value: string | undefined) {
@@ -40,10 +51,19 @@ function normalizeRecordingTitle(value: string | undefined) {
 }
 
 /** Prefer an original-looking exact recording over compilations, DJ mixes, and single-only releases. */
-export function selectCatalogTrack(artist: string, title: string, tracks: CatalogTrack[], preferredAlbum?: string) {
+export function selectCatalogTrack(
+  artist: string,
+  title: string,
+  tracks: CatalogTrack[],
+  preferredAlbumOrOptions?: string | SelectCatalogOptions,
+  maybeOptions?: SelectCatalogOptions,
+) {
+  const options: SelectCatalogOptions = typeof preferredAlbumOrOptions === "string" || preferredAlbumOrOptions === undefined
+    ? { preferredAlbum: preferredAlbumOrOptions, ...maybeOptions }
+    : preferredAlbumOrOptions;
   const wantedArtist = normalize(artist);
   const wantedTitle = normalizeRecordingTitle(title);
-  const wantedAlbum = normalize(preferredAlbum);
+  const wantedAlbum = normalize(options.preferredAlbum);
   let best: { track: CatalogTrack; score: number } | undefined;
 
   for (const track of tracks) {
@@ -62,7 +82,13 @@ export function selectCatalogTrack(artist: string, title: string, tracks: Catalo
     const preferredAlbumBonus = wantedAlbum && !isSingleRelease(track) && normalize(track.collectionName) === wantedAlbum ? 80 : 0;
     const albumLengthBonus = Math.min(12, Math.max(0, (track.trackCount ?? 1) - 1));
     const singlePenalty = isSingleRelease(track) ? 24 : 0;
-    const score = artistScore + titleScore + preferredAlbumBonus + albumLengthBonus - compilationPenalty - singlePenalty;
+    // Vinyl discovery only: assume the needle is at the start of the record.
+    // Strong enough to beat AudD's preferred compilation/box-set album (+80).
+    const openerAdjustment = options.preferAlbumOpener
+      ? (isAlbumOpener(track) ? 50 : -90)
+      : 0;
+    const score = artistScore + titleScore + preferredAlbumBonus + albumLengthBonus + openerAdjustment
+      - compilationPenalty - singlePenalty;
     if (!best || score > best.score) best = { track, score };
   }
 

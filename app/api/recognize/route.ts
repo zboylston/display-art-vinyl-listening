@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { fetchVinylSides } from "../../lib/discogs";
 import { largeAlbumArtwork, orderedCatalogAlbum, selectCatalogTrack, type CatalogTrack } from "../../lib/track-metadata";
 import { pickGenreLabel } from "../../lib/visual-brief";
 
@@ -70,6 +71,8 @@ export async function POST(request: Request) {
     if (!input) return NextResponse.json({ error: "Expected a multipart audio capture." }, { status: 400 });
     const audio = input.get("audio");
     const vinylMode = input.get("mode") === "vinyl";
+    // Client sets this only on the first vinyl lock — not mid-album heartbeats.
+    const preferAlbumOpener = input.get("preferAlbumOpener") === "1";
     if (!(audio instanceof File)) return NextResponse.json({ error: "Missing audio capture." }, { status: 400 });
     if (audio.size < MIN_CAPTURE_BYTES) return NextResponse.json({ error: "Audio capture is too short." }, { status: 400 });
     if (audio.size > MAX_CAPTURE_BYTES) return NextResponse.json({ error: "Audio capture is too large." }, { status: 413 });
@@ -110,18 +113,23 @@ export async function POST(request: Request) {
       artist,
       title,
       [...(catalogById ? [catalogById] : []), ...catalogCandidates],
-      preferredAlbum,
+      { preferredAlbum, preferAlbumOpener },
     );
     const genre = pickGenreLabel(appleGenres[0], appleGenres[1], catalog?.primaryGenreName, catalogById?.primaryGenreName);
     const discoveredAlbumTracks = vinylMode && catalog?.collectionId ? await catalogAlbum(catalog.collectionId) : [];
     // A one-track result is generally a single, not a usable vinyl sequence. Keep
     // recognition live in that case instead of falsely locking at “Track 1 of 1”.
     const albumTracks = discoveredAlbumTracks.length > 1 ? discoveredAlbumTracks : [];
+    // True vinyl sides from Discogs release positions. Absent unless confirmed —
+    // the record-flip experience only runs on confirmed side data.
+    const vinylSides = vinylMode && albumTracks.length > 1 && catalog?.collectionName
+      ? await fetchVinylSides(artist, catalog.collectionName, albumTracks.map((track) => track.trackName ?? ""), process.env.DISCOGS_API_TOKEN)
+      : undefined;
     const sequenceIndex = albumTracks.findIndex((track) => (
       (Boolean(catalog?.trackId) && track.trackId === catalog?.trackId)
       || (Boolean(catalog) && track.trackName === catalog?.trackName && track.artistName === catalog?.artistName)
     ));
-    const albumSequence = albumTracks.map((track) => ({
+    const albumSequence = albumTracks.map((track, index) => ({
       artist: track.artistName ?? artist,
       title: track.trackName ?? "Unknown track",
       album: track.collectionName ?? catalog?.collectionName ?? "Album unknown",
@@ -131,9 +139,10 @@ export async function POST(request: Request) {
       collectionId: track.collectionId,
       trackNumber: track.trackNumber,
       discNumber: track.discNumber,
+      side: vinylSides?.[index],
       genre,
     }));
-    console.info(`[recognize] mode=${vinylMode ? "vinyl" : "live"} catalog=${catalog?.collectionId ?? "none"} sequence=${albumSequence.length} index=${sequenceIndex}`);
+    console.info(`[recognize] mode=${vinylMode ? "vinyl" : "live"} catalog=${catalog?.collectionId ?? "none"} sequence=${albumSequence.length} index=${sequenceIndex} sides=${vinylSides ? vinylSides.filter(Boolean).length : "none"}`);
     return NextResponse.json({
       result: {
         artist,

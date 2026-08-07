@@ -42,3 +42,27 @@ export function shiftedBoundaryAfterPause(boundaryAt: number, pausedAt: number, 
   if (!boundaryAt || resumedAt <= pausedAt) return boundaryAt;
   return boundaryAt + (resumedAt - pausedAt);
 }
+
+type VinylIdentity = { artist: string; title: string };
+
+/**
+ * Locate a recognized song inside a locked vinyl sequence.
+ * Prefers the match at/after `preferFromIndex` (wrapping) so reprises and
+ * duplicate titles snap to the upcoming copy rather than the first.
+ * Returns -1 when the heard track is not on this album.
+ */
+export function findVinylAlbumIndex(
+  tracks: VinylIdentity[],
+  recognized: VinylIdentity,
+  keyFor: (track: VinylIdentity) => string,
+  preferFromIndex = 0,
+) {
+  const wanted = keyFor(recognized);
+  if (!wanted || !tracks.length) return -1;
+  const start = Math.min(Math.max(0, preferFromIndex), tracks.length - 1);
+  for (let offset = 0; offset < tracks.length; offset += 1) {
+    const index = (start + offset) % tracks.length;
+    if (keyFor(tracks[index]) === wanted) return index;
+  }
+  return -1;
+}

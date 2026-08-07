@@ -28,6 +28,15 @@ describe("RecognitionGate", () => {
     expect(gate.tryStart(6_999)).toBe(false);
     expect(gate.tryStart(7_000)).toBe(true);
   });
+
+  it("force-starts past cooldown for vinyl post-advance verifies", () => {
+    const gate = new RecognitionGate();
+    expect(gate.tryStart(1_000)).toBe(true);
+    gate.finish(2_000, 15_000);
+    expect(gate.tryStart(3_000)).toBe(false);
+    expect(gate.tryStartForced()).toBe(true);
+    expect(gate.tryStartForced()).toBe(false);
+  });
 });
 
 describe("noMatchRetryDelay", () => {

@@ -8,7 +8,9 @@ An art-first television experience for music listening.
 
 **Live mode** uses local spectral and silence detection to follow arbitrary playback, calling AudD only when the local gate suspects a meaningful transition.
 
-**Vinyl mode** identifies the playing track once, resolves its ordered Apple catalog album sequence, estimates the current track ending from AudD's timecode, and begins curating the next track in the background. A track gap, a near-boundary spectral change, or the predicted ending advances immediately to the preloaded artwork. Mid-track pauses freeze the prediction; an unexpected change re-runs AudD to handle a moved needle, skipped track, or mismatched pressing. Timer-only transitions receive a delayed confirmation check, while clean predicted gaps advance without another recognition call.
+**Vinyl mode** identifies the playing track once, resolves its ordered Apple catalog album sequence, estimates the current track ending from AudD's timecode, and begins curating the next track in the background. A track gap, a near-boundary spectral change, or the predicted ending advances immediately to the preloaded artwork. Mid-track pauses freeze the prediction; an unexpected change re-runs AudD to handle a moved needle, skipped track, or mismatched pressing. Every advance is followed by a delayed confirmation check that corrects the sequence when the needle landed somewhere other than the planned track.
+
+With `DISCOGS_API_TOKEN` set, vinyl mode also resolves true record sides from Discogs release positions (A1, B1…). At a confirmed side boundary the app pauses on a "Flip the record" interstitial instead of advancing, then confirms the needle drop with AudD — so a replayed side or a wrong-side drop corrects itself. Without a token, or when Discogs cannot confirm sides, the feature stays off rather than guessing.
 
 This repository begins with replayable provider fixtures and the three-act TV display prototype. The original product context remains in the sibling `music-art-context` directory until it is deliberately incorporated here.
 
