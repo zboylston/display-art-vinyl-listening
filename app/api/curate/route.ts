@@ -16,7 +16,8 @@ import {
 const metApi = "https://collectionapi.metmuseum.org/public/collection/v1";
 const clevelandApi = "https://openaccess-api.clevelandart.org/api/artworks/";
 const chicagoApi = "https://api.artic.edu/api/v1/artworks/search";
-const model = "gpt-5.6-sol";
+const model = "gpt-5.6-terra";
+const reasoning = { effort: "high" as const };
 type ArtSource = "met" | "cleveland" | "artic";
 
 type Track = { artist?: string; title?: string; album?: string; year?: string; genre?: string };
@@ -62,6 +63,7 @@ function jsonFromModel(text: string): unknown {
 async function createDossier(client: OpenAI, track: CleanTrack): Promise<SongDossier> {
   const response = await client.responses.create({
     model,
+    reasoning,
     input: [
       {
         role: "developer",
@@ -83,6 +85,7 @@ async function createVisualPlan(client: OpenAI, track: CleanTrack, dossier: Song
 
   const response = await client.responses.create({
     model,
+    reasoning,
     input: [
       {
         role: "developer",
@@ -102,6 +105,7 @@ async function refillSearchTerms(client: OpenAI, track: CleanTrack, dossier: Son
   if (needed <= 0) return brief.museum_search_terms;
   const response = await client.responses.create({
     model,
+    reasoning,
     input: [
       {
         role: "developer",
@@ -416,6 +420,7 @@ async function chooseSemifinalists(client: OpenAI, track: CleanTrack, brief: Vis
   if (candidates.length <= SEMIFINALISTS_PER_BATCH) return candidates;
   const response = await client.responses.create({
     model,
+    reasoning,
     input: [
       { role: "developer", content: "You are a museum curator conducting a comparative semifinal for a widescreen television display. Prefer works that match the brief's positive energy, sonic character, and motifs. Reject merely decorative or off-energy matches. Return JSON only. Never invent facts." },
       {
@@ -440,6 +445,7 @@ async function chooseSemifinalists(client: OpenAI, track: CleanTrack, brief: Vis
 async function chooseCandidate(client: OpenAI, track: CleanTrack, brief: VisualBrief, candidates: CuratorCandidate[]) {
   const response = await client.responses.create({
     model,
+    reasoning,
     input: [
       { role: "developer", content: "You are the final critic for a museum-quality music and art pairing on a widescreen television. Compare the finalists directly, apply the stated rubric and penalties, and choose the exceptional pairing rather than the first defensible one. Weight fidelity to this recording's stated energy and sonic character above generic elegance. Candidates are verified two-dimensional fine art. Do not invent works, artists, lyrics, history, or other facts. Return JSON only." },
       {
