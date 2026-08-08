@@ -8,14 +8,19 @@ import { sanitizeDisplayStatus } from "./lib/display-snapshot";
 import { canonicalTrackKey, INITIAL_DISCOVERY_CAPTURE_MS, noMatchRetryDelay, RecognitionGate, textTrackKey } from "./lib/recognition";
 import { parseRecentArtworkIds, pushRecentArtworkId, shouldRefreshCachedArtwork } from "./lib/recent-artwork";
 import {
+  VINYL_END_CONFIRM_GAPLESS_SNAPSHOT_SECONDS,
+  VINYL_VERIFY_SNAPSHOT_SECONDS,
   advanceVerificationAt,
   armVinylGapLatch,
-  canPredictiveAdvance,
   isVinylGapLatchExpired,
   rollbackAdvanceIndex,
   shouldAdvanceOnGapResume,
+  shouldArmEndConfirm,
+  shouldFireEndConfirm,
   shouldParkVinylOnSilence,
   shouldRollbackUnverifiedAdvance,
+  shouldTimeoutEndConfirm,
+  silenceFirstAllowsBlindBoundaryAdvance,
   type VinylGapLatch,
 } from "./lib/vinyl-advance";
 import { planVinylHeartbeats } from "./lib/vinyl-heartbeats";
@@ -28,7 +33,7 @@ type ListeningMode = "live" | "vinyl";
 type AudioInput = { deviceId: string; label: string };
 type Artwork = { id?: string; title: string; artist: string; date: string; museum: string; image: string; rationale: string; brief?: unknown };
 type Track = { artist: string; title: string; album: string; year: string; albumCover?: string; isrc?: string; durationMs?: number; timecodeMs?: number; collectionId?: number; trackNumber?: number; discNumber?: number; genre?: string };
-type RecognitionReason = "music-started" | "music-resumed" | "spectral-change" | "expected-ending" | "safety-check" | "heartbeat" | "pre-transition" | "transition-confirmation" | "legacy-fallback";
+type RecognitionReason = "music-started" | "music-resumed" | "spectral-change" | "expected-ending" | "end-confirm" | "safety-check" | "heartbeat" | "pre-transition" | "transition-confirmation" | "legacy-fallback";
 type RingSnapshot = { samples: Float32Array; sampleRate: number };
 type SnapshotRequest = { resolve: (snapshot: RingSnapshot) => void; reject: (error: Error) => void; timeout: number };
 type AudioDebug = { state: DetectorState; score: number; rms: number; reason: string };
@@ -70,7 +75,11 @@ function timecodeToMs(timecode?: string): number | undefined {
 }
 
 function isQuietTimingCheck(reason: RecognitionReason) {
-  return reason === "heartbeat" || reason === "pre-transition";
+  return reason === "heartbeat" || reason === "pre-transition" || reason === "end-confirm" || reason === "expected-ending";
+}
+
+function isAudibleDetectorState(state: DetectorState) {
+  return state === "stable" || state === "suspected" || state === "resuming";
 }
 
 function isPresentationAct(act: Act) {
@@ -134,6 +143,12 @@ export default function Home() {
   const vinylParkedRef = useRef(false);
   const vinylAdvancePendingVerifyRef = useRef(false);
   const vinylAdvanceInFlightRef = useRef(false);
+  const vinylEndConfirmPendingRef = useRef(false);
+  const vinylEndConfirmArmedAtRef = useRef(0);
+  const vinylEndConfirmInFlightRef = useRef(false);
+  /** True when end-confirm armed while music was already playing (gapless). */
+  const vinylEndConfirmGaplessRef = useRef(false);
+  const vinylLastAdvanceReasonRef = useRef<"gap" | "none">("none");
   const vinylPreloadRef = useRef<{ key: string; promise: Promise<Artwork> } | null>(null);
   const vinylMidpointHeartbeatAtRef = useRef(0);
   const vinylPreTransitionHeartbeatAtRef = useRef(0);
@@ -284,6 +299,13 @@ export default function Home() {
     }, remainingTrackTime);
   }
 
+  function clearVinylEndConfirm() {
+    vinylEndConfirmPendingRef.current = false;
+    vinylEndConfirmArmedAtRef.current = 0;
+    vinylEndConfirmInFlightRef.current = false;
+    vinylEndConfirmGaplessRef.current = false;
+  }
+
   function resetVinylPrediction() {
     vinylAlbumRef.current = null;
     vinylBoundaryAtRef.current = 0;
@@ -293,6 +315,8 @@ export default function Home() {
     vinylParkedRef.current = false;
     vinylAdvancePendingVerifyRef.current = false;
     vinylAdvanceInFlightRef.current = false;
+    vinylLastAdvanceReasonRef.current = "none";
+    clearVinylEndConfirm();
     vinylPreloadRef.current = null;
     vinylMidpointHeartbeatAtRef.current = 0;
     vinylPreTransitionHeartbeatAtRef.current = 0;
@@ -312,16 +336,20 @@ export default function Home() {
     vinylGapPendingRef.current = false;
     vinylGapLatchRef.current = null;
     vinylParkedRef.current = true;
+    clearVinylEndConfirm();
     if (!vinylPauseAtRef.current) vinylPauseAtRef.current = Date.now();
     vinylMidpointHeartbeatAtRef.current = 0;
     vinylPreTransitionHeartbeatAtRef.current = 0;
     nextFallbackAtRef.current = 0;
     if (shouldAnnounceRecognitionStatus()) setStatus("Waiting for the record to keep playing…");
+    setAudioDebug((debug) => ({ ...debug, reason: "park" }));
   }
 
   /** Undo a predicted advance whose confirm check heard no music. */
   function rollbackUnverifiedVinylAdvance() {
     vinylAdvancePendingVerifyRef.current = false;
+    vinylLastAdvanceReasonRef.current = "none";
+    clearVinylEndConfirm();
     const album = vinylAlbumRef.current;
     const previousIndex = album ? rollbackAdvanceIndex(album.index) : null;
     if (album && previousIndex !== null) {
@@ -339,6 +367,7 @@ export default function Home() {
     vinylMidpointHeartbeatAtRef.current = 0;
     vinylPreTransitionHeartbeatAtRef.current = 0;
     nextFallbackAtRef.current = 0;
+    setAudioDebug((debug) => ({ ...debug, reason: "rollback+park" }));
   }
 
   function updateVinylProgress() {
@@ -379,6 +408,7 @@ export default function Home() {
     vinylGapPendingRef.current = false;
     vinylGapLatchRef.current = null;
     vinylParkedRef.current = false;
+    clearVinylEndConfirm();
     nextFallbackAtRef.current = 0;
     scheduleVinylHeartbeats();
     updateVinylProgress();
@@ -423,15 +453,17 @@ export default function Home() {
     });
   }
 
-  async function advanceVinyl(reason: "gap" | "timer" | "spectral") {
+  async function advanceVinyl(reason: "gap") {
     const album = vinylAlbumRef.current;
     if (!album || vinylAdvanceInFlightRef.current) return false;
+    if (!silenceFirstAllowsBlindBoundaryAdvance() && reason !== "gap") return false;
     const nextIndex = album.index + 1;
     const next = album.tracks[nextIndex];
     if (!next) {
       vinylBoundaryAtRef.current = 0;
       vinylMidpointHeartbeatAtRef.current = 0;
       vinylPreTransitionHeartbeatAtRef.current = 0;
+      clearVinylEndConfirm();
       setVinylProgress(null);
       setStatus("The album sequence is complete — listening for the next record.");
       return false;
@@ -444,6 +476,7 @@ export default function Home() {
     vinylGapPendingRef.current = false;
     vinylGapLatchRef.current = null;
     vinylParkedRef.current = false;
+    clearVinylEndConfirm();
     if (vinylEarlyConfirmationTimerRef.current) window.clearTimeout(vinylEarlyConfirmationTimerRef.current);
     vinylEarlyConfirmationTimerRef.current = null;
     scheduleVinylHeartbeats();
@@ -452,11 +485,12 @@ export default function Home() {
     changeRecognitionPhase("matched");
     if (phaseTimerRef.current) window.clearTimeout(phaseTimerRef.current);
     phaseTimerRef.current = window.setTimeout(() => changeRecognitionPhase("listening"), 2_800);
-    // Every predicted advance must be confirmed — gap/spectral used to skip this
-    // and could walk the album on room noise after the record stopped.
+    // Gap advance must be confirmed with a post-gap clip (~10s in the ring).
     vinylAdvancePendingVerifyRef.current = true;
+    vinylLastAdvanceReasonRef.current = "gap";
     nextFallbackAtRef.current = advanceVerificationAt(Date.now());
     nextFallbackReasonRef.current = "expected-ending";
+    setAudioDebug((debug) => ({ ...debug, reason: `advance:${reason}` }));
     try {
       const preload = vinylPreloadRef.current?.key === artworkCacheKey(next) ? vinylPreloadRef.current.promise : undefined;
       const prepared = preload ? await preload.catch(() => undefined) : undefined;
@@ -556,7 +590,23 @@ export default function Home() {
     recognitionGateRef.current.finish(now, cooldown);
     detectorRef.current.markRecognition(now, cooldown);
     detectorRef.current.resetHistory(now);
-    if (shouldRollbackUnverifiedAdvance({ pendingVerify: vinylAdvancePendingVerifyRef.current, outcome })) {
+    if (reason === "end-confirm") {
+      vinylEndConfirmInFlightRef.current = false;
+      clearVinylEndConfirm();
+      if (outcome === "none" || outcome === "error") {
+        parkVinylPlayback();
+        consecutiveNoMatchRef.current += 1;
+      } else {
+        consecutiveNoMatchRef.current = 0;
+        vinylParkedRef.current = false;
+        // If refine rejected a large correction, the boundary can still be in the
+        // past and we'd immediately re-arm end-confirm — nudge it forward.
+        if (outcome === "same" && vinylBoundaryAtRef.current <= now) {
+          vinylBoundaryAtRef.current = now + 30_000;
+          scheduleVinylHeartbeats();
+        }
+      }
+    } else if (shouldRollbackUnverifiedAdvance({ pendingVerify: vinylAdvancePendingVerifyRef.current, outcome })) {
       rollbackUnverifiedVinylAdvance();
       consecutiveNoMatchRef.current += 1;
     } else if (outcome === "none" || outcome === "error") {
@@ -568,6 +618,7 @@ export default function Home() {
       consecutiveNoMatchRef.current = 0;
       // Same-song confirm or a fresh match clears the pending advance verify.
       vinylAdvancePendingVerifyRef.current = false;
+      vinylLastAdvanceReasonRef.current = "none";
     }
     setAudioDebug((debug) => ({ ...debug, reason: `${reason}:${outcome}` }));
     if (phaseTimerRef.current) window.clearTimeout(phaseTimerRef.current);
@@ -603,7 +654,10 @@ export default function Home() {
 
   async function requestRecognition(reason: RecognitionReason) {
     const now = Date.now();
-    if (!listeningRef.current || !recognitionGateRef.current.tryStart(now)) return;
+    if (!listeningRef.current || !recognitionGateRef.current.tryStart(now)) {
+      if (reason === "end-confirm") vinylEndConfirmInFlightRef.current = false;
+      return;
+    }
     lastCheckAtRef.current = now;
     detectorRef.current.markRecognition(now, RECOGNITION_COOLDOWN_MS);
     changeRecognitionPhase("checking");
@@ -621,9 +675,13 @@ export default function Home() {
         ? 10
         : reason === "music-resumed"
           ? 5
-          : vinylDiscovery
-            ? vinylDiscoverySeconds
-            : SNAPSHOT_SECONDS;
+          : reason === "end-confirm" && vinylEndConfirmGaplessRef.current
+            ? VINYL_END_CONFIRM_GAPLESS_SNAPSHOT_SECONDS
+            : reason === "expected-ending" || reason === "end-confirm"
+              ? VINYL_VERIFY_SNAPSHOT_SECONDS
+              : vinylDiscovery
+                ? vinylDiscoverySeconds
+                : SNAPSHOT_SECONDS;
       const snapshot = await takeRingSnapshot(snapshotSeconds);
       const capturedAt = Date.now();
       if (snapshot.samples.length < snapshot.sampleRate * 4) throw new Error("Waiting for a longer music sample.");
@@ -645,6 +703,11 @@ export default function Home() {
       const outcome = await identifyRecording(audio, capturedAt, reason, (prepared.samples.length / snapshot.sampleRate) * 1000);
       finishRecognition(outcome, reason);
     } catch (error) {
+      if (reason === "end-confirm") {
+        vinylEndConfirmInFlightRef.current = false;
+        clearVinylEndConfirm();
+        parkVinylPlayback();
+      }
       recognitionGateRef.current.finish(Date.now(), NO_MATCH_COOLDOWN_MS);
       detectorRef.current.markRecognition(Date.now(), NO_MATCH_COOLDOWN_MS);
       nextFallbackAtRef.current = Date.now() + 10_000;
@@ -689,10 +752,12 @@ export default function Home() {
           if (isNearVinylBoundary(vinylBoundaryAtRef.current, wallNow) && !vinylParkedRef.current) {
             vinylGapPendingRef.current = true;
             vinylGapLatchRef.current = armVinylGapLatch(wallNow);
+            clearVinylEndConfirm();
             // Freeze the timer clock too — otherwise ambient noise can satisfy
             // state !== "silence" and walk the album after the record stops.
             if (!vinylPauseAtRef.current) vinylPauseAtRef.current = wallNow;
             if (shouldAnnounceRecognitionStatus()) setStatus("Preparing next track…");
+            setAudioDebug((debug) => ({ ...debug, reason: "arm-gap" }));
           } else {
             vinylPauseAtRef.current = wallNow;
           }
@@ -743,6 +808,13 @@ export default function Home() {
         if (USE_AUDIO_CHANGE_DETECTOR && update.event === "music-resumed") {
           if (shouldAdvanceOnGapResume(vinylGapPendingRef.current, update.event)) {
             void advanceVinyl("gap");
+          } else if (vinylEndConfirmPendingRef.current) {
+            // End timer already fired; start the audible capture clock once (don't reset on flaps).
+            if (!vinylEndConfirmArmedAtRef.current) vinylEndConfirmArmedAtRef.current = wallNow;
+            vinylEndConfirmGaplessRef.current = false;
+            vinylParkedRef.current = false;
+            vinylPauseAtRef.current = 0;
+            setAudioDebug((debug) => ({ ...debug, reason: "end-capturing" }));
           } else if (vinylMode && vinylParkedRef.current) {
             vinylParkedRef.current = false;
             vinylPauseAtRef.current = 0;
@@ -751,31 +823,53 @@ export default function Home() {
             void requestRecognition("music-resumed");
           }
         }
-        const allowPredictiveAdvance = canPredictiveAdvance({
-          parked: vinylParkedRef.current,
-          paused: Boolean(vinylPauseAtRef.current),
-          gapPending: vinylGapPendingRef.current,
-        });
         if (USE_AUDIO_CHANGE_DETECTOR && update.event === "change-suspected") {
+          // Live mode still uses spectral change. Vinyl silence-first ignores it for advances.
           if (!vinylMode || !vinylAlbumRef.current) void requestRecognition("spectral-change");
-          else if (isNearVinylBoundary(vinylBoundaryAtRef.current, wallNow) && allowPredictiveAdvance) {
-            void advanceVinyl("spectral");
-          }
         }
-        if (
-          vinylMode
-          && vinylAlbumRef.current
-          && vinylBoundaryAtRef.current > 0
-          && wallNow >= vinylBoundaryAtRef.current
-          && canPredictiveAdvance({
-            parked: vinylParkedRef.current,
-            paused: Boolean(vinylPauseAtRef.current),
-            gapPending: vinylGapPendingRef.current,
-            detectorState: update.state,
-            requireStable: true,
-          })
-        ) {
-          void advanceVinyl("timer");
+        if (vinylMode && vinylAlbumRef.current && vinylBoundaryAtRef.current > 0) {
+          const pastBoundary = wallNow >= vinylBoundaryAtRef.current;
+          const audible = isAudibleDetectorState(update.state);
+
+          if (
+            shouldTimeoutEndConfirm({
+              endConfirmPending: vinylEndConfirmPendingRef.current,
+              endConfirmArmedAt: vinylEndConfirmArmedAtRef.current,
+              boundaryAt: vinylBoundaryAtRef.current,
+              now: wallNow,
+              audible,
+            })
+          ) {
+            parkVinylPlayback();
+          } else if (
+            shouldFireEndConfirm({
+              endConfirmPending: vinylEndConfirmPendingRef.current,
+              endConfirmArmedAt: vinylEndConfirmArmedAtRef.current,
+              now: wallNow,
+              audible,
+              gapless: vinylEndConfirmGaplessRef.current,
+            })
+            && !vinylEndConfirmInFlightRef.current
+            && !vinylAdvanceInFlightRef.current
+          ) {
+            vinylEndConfirmInFlightRef.current = true;
+            setAudioDebug((debug) => ({ ...debug, reason: "end-confirm" }));
+            void requestRecognition("end-confirm");
+          } else if (
+            shouldArmEndConfirm({
+              pastBoundary,
+              parked: vinylParkedRef.current,
+              gapPending: vinylGapPendingRef.current,
+              pendingVerify: vinylAdvancePendingVerifyRef.current,
+              endConfirmPending: vinylEndConfirmPendingRef.current,
+            })
+            && !silenceFirstAllowsBlindBoundaryAdvance()
+          ) {
+            vinylEndConfirmPendingRef.current = true;
+            vinylEndConfirmArmedAtRef.current = audible ? wallNow : 0;
+            vinylEndConfirmGaplessRef.current = audible;
+            setAudioDebug((debug) => ({ ...debug, reason: audible ? "end-capturing" : "end-waiting" }));
+          }
         }
         if (predictiveVinyl && !vinylAdvanceInFlightRef.current) {
           if (vinylMidpointHeartbeatAtRef.current > 0 && wallNow >= vinylMidpointHeartbeatAtRef.current) {
@@ -986,7 +1080,16 @@ export default function Home() {
   const vinylSeconds = vinylBoundaryAtRef.current ? Math.round((vinylBoundaryAtRef.current - Date.now()) / 1000) : undefined;
   const nextVinylHeartbeatAt = [vinylMidpointHeartbeatAtRef.current, vinylPreTransitionHeartbeatAtRef.current].filter((at) => at > 0).sort((left, right) => left - right)[0];
   const vinylHeartbeatSeconds = nextVinylHeartbeatAt ? Math.max(0, Math.round((nextVinylHeartbeatAt - Date.now()) / 1000)) : undefined;
-  const debugPanel = showAudioDebug ? <aside className="audio-debug" aria-label="Audio detector diagnostics"><strong>{audioDebug.state}</strong><span>{listeningMode}</span>{activeMicrophone && <span>{activeMicrophone}</span>}<span>change {audioDebug.score.toFixed(3)}</span><span>rms {audioDebug.rms.toFixed(3)}</span><span>AudD calls {auddCalls}</span>{vinylSeconds !== undefined && <span>next {vinylSeconds}s</span>}{vinylHeartbeatSeconds !== undefined && <span>heartbeat {vinylHeartbeatSeconds}s</span>}<span>{audioDebug.reason}</span>{captureDebug && <span>{captureDebug}</span>}{lastSampleUrl && <a href={lastSampleUrl} download="music-art-last-sample.wav" onClick={(event) => event.stopPropagation()}>download sample</a>}</aside> : null;
+  const vinylDebugFlags = listeningMode === "vinyl" ? [
+    vinylParkedRef.current ? "parked" : null,
+    vinylGapPendingRef.current ? "gap" : null,
+    vinylAdvancePendingVerifyRef.current ? "verify" : null,
+    vinylEndConfirmPendingRef.current
+      ? (vinylEndConfirmArmedAtRef.current ? "end-capturing" : "end-waiting")
+      : null,
+    vinylLastAdvanceReasonRef.current !== "none" ? `adv:${vinylLastAdvanceReasonRef.current}` : null,
+  ].filter(Boolean).join(" ") : "";
+  const debugPanel = showAudioDebug ? <aside className="audio-debug" aria-label="Audio detector diagnostics"><strong>{audioDebug.state}</strong><span>{listeningMode}</span>{activeMicrophone && <span>{activeMicrophone}</span>}<span>change {audioDebug.score.toFixed(3)}</span><span>rms {audioDebug.rms.toFixed(3)}</span><span>AudD calls {auddCalls}</span>{vinylSeconds !== undefined && <span>next {vinylSeconds}s</span>}{vinylHeartbeatSeconds !== undefined && <span>heartbeat {vinylHeartbeatSeconds}s</span>}{vinylDebugFlags && <span>{vinylDebugFlags}</span>}<span>{audioDebug.reason}</span>{captureDebug && <span>{captureDebug}</span>}{lastSampleUrl && <a href={lastSampleUrl} download="music-art-last-sample.wav" onClick={(event) => event.stopPropagation()}>download sample</a>}</aside> : null;
   const transitionLabel = recognitionPhase === "suspected" ? "Possible new song" : recognitionPhase === "checking" ? "Identifying new song" : "New selection found";
   const vinylSequenceIsActive = listeningMode === "vinyl" && Boolean(vinylAlbumRef.current);
   const transitionIndicator = !vinylSequenceIsActive && (recognitionPhase === "suspected" || recognitionPhase === "checking" || recognitionPhase === "matched") ? <aside className="transition-indicator" data-phase={recognitionPhase} aria-live="polite"><span className="signal-bars" aria-hidden="true"><i /><i /><i /><i /></span><span><small>{recognitionPhase === "suspected" ? "Listening closely" : recognitionPhase === "checking" ? "Checking the sound" : "Now playing"}</small><strong>{transitionLabel}</strong></span></aside> : null;

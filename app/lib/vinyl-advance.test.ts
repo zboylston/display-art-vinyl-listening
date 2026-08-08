@@ -1,16 +1,24 @@
 import { describe, expect, it } from "vitest";
 import {
   VINYL_ADVANCE_VERIFY_MS,
+  VINYL_END_CONFIRM_CAPTURE_MS,
+  VINYL_END_CONFIRM_GAPLESS_CAPTURE_MS,
+  VINYL_END_CONFIRM_TIMEOUT_MS,
   VINYL_GAP_LATCH_EXPIRE_MS,
   VINYL_SUSTAINED_SILENCE_PARK_MS,
   advanceVerificationAt,
   armVinylGapLatch,
   canPredictiveAdvance,
+  endConfirmCaptureMs,
   isVinylGapLatchExpired,
   rollbackAdvanceIndex,
   shouldAdvanceOnGapResume,
+  shouldArmEndConfirm,
+  shouldFireEndConfirm,
   shouldParkVinylOnSilence,
   shouldRollbackUnverifiedAdvance,
+  shouldTimeoutEndConfirm,
+  silenceFirstAllowsBlindBoundaryAdvance,
 } from "./vinyl-advance";
 
 describe("vinyl gap latch", () => {
@@ -74,5 +82,85 @@ describe("predictive advance gates", () => {
     expect(canPredictiveAdvance({ parked: false, paused: false, gapPending: false, detectorState: "resuming", requireStable: true })).toBe(false);
     expect(canPredictiveAdvance({ parked: false, paused: false, gapPending: false, detectorState: "suspected", requireStable: true })).toBe(false);
     expect(canPredictiveAdvance({ parked: false, paused: false, gapPending: false, detectorState: "stable" })).toBe(true);
+  });
+
+  it("silence-first forbids blind boundary advances", () => {
+    expect(silenceFirstAllowsBlindBoundaryAdvance()).toBe(false);
+  });
+});
+
+describe("end-confirm arming", () => {
+  it("arms only past the boundary without gap/park/verify already active", () => {
+    expect(shouldArmEndConfirm({
+      pastBoundary: true,
+      parked: false,
+      gapPending: false,
+      pendingVerify: false,
+      endConfirmPending: false,
+    })).toBe(true);
+    expect(shouldArmEndConfirm({
+      pastBoundary: true,
+      parked: false,
+      gapPending: true,
+      pendingVerify: false,
+      endConfirmPending: false,
+    })).toBe(false);
+  });
+
+  it("fires only after enough audible capture", () => {
+    expect(shouldFireEndConfirm({
+      endConfirmPending: true,
+      endConfirmArmedAt: 1_000,
+      now: 1_000 + VINYL_END_CONFIRM_CAPTURE_MS - 1,
+      audible: true,
+    })).toBe(false);
+    expect(shouldFireEndConfirm({
+      endConfirmPending: true,
+      endConfirmArmedAt: 1_000,
+      now: 1_000 + VINYL_END_CONFIRM_CAPTURE_MS,
+      audible: true,
+    })).toBe(true);
+    expect(shouldFireEndConfirm({
+      endConfirmPending: true,
+      endConfirmArmedAt: 1_000,
+      now: 1_000 + VINYL_END_CONFIRM_CAPTURE_MS,
+      audible: false,
+    })).toBe(false);
+  });
+
+  it("uses a shorter capture window for gapless (already-audible) end-confirm", () => {
+    expect(endConfirmCaptureMs(true)).toBe(VINYL_END_CONFIRM_GAPLESS_CAPTURE_MS);
+    expect(endConfirmCaptureMs(false)).toBe(VINYL_END_CONFIRM_CAPTURE_MS);
+    expect(shouldFireEndConfirm({
+      endConfirmPending: true,
+      endConfirmArmedAt: 1_000,
+      now: 1_000 + VINYL_END_CONFIRM_GAPLESS_CAPTURE_MS - 1,
+      audible: true,
+      gapless: true,
+    })).toBe(false);
+    expect(shouldFireEndConfirm({
+      endConfirmPending: true,
+      endConfirmArmedAt: 1_000,
+      now: 1_000 + VINYL_END_CONFIRM_GAPLESS_CAPTURE_MS,
+      audible: true,
+      gapless: true,
+    })).toBe(true);
+  });
+
+  it("times out when sound never returns after the end timer", () => {
+    expect(shouldTimeoutEndConfirm({
+      endConfirmPending: true,
+      endConfirmArmedAt: 0,
+      boundaryAt: 1_000,
+      now: 1_000 + VINYL_END_CONFIRM_TIMEOUT_MS,
+      audible: false,
+    })).toBe(true);
+    expect(shouldTimeoutEndConfirm({
+      endConfirmPending: true,
+      endConfirmArmedAt: 0,
+      boundaryAt: 1_000,
+      now: 1_000 + VINYL_END_CONFIRM_TIMEOUT_MS,
+      audible: true,
+    })).toBe(false);
   });
 });

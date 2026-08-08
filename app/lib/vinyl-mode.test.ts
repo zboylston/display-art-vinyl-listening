@@ -19,8 +19,8 @@ describe("vinyl timing", () => {
   });
 
   it("only treats changes close to the predicted ending as album progression", () => {
-    expect(isNearVinylBoundary(100_000, 89_000)).toBe(true);
-    expect(isNearVinylBoundary(100_000, 70_000)).toBe(false);
+    expect(isNearVinylBoundary(100_000, 80_000)).toBe(true);
+    expect(isNearVinylBoundary(100_000, 79_000)).toBe(false);
     expect(isNearVinylBoundary(100_000, 145_000)).toBe(true);
     expect(isNearVinylBoundary(100_000, 146_000)).toBe(false);
   });
