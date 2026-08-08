@@ -5,6 +5,7 @@ import { PresentationStage } from "../components/presentation-stage";
 import {
   createEmptySnapshot,
   isDisplayCode,
+  isPresentationAct,
   normalizeDisplayCode,
   parseDisplaySnapshot,
   type DisplaySnapshot,
@@ -140,6 +141,8 @@ export default function DisplayPage() {
     );
   }
 
+  const hasPresentation = Boolean(snapshot?.currentTrack && isPresentationAct(snapshot.act));
+
   return (
     <div className="display-shell" data-connected={connected ? "true" : "false"}>
       {!connected && (
@@ -151,13 +154,15 @@ export default function DisplayPage() {
         snapshot={snapshot ?? createEmptySnapshot({ status: "Connected — waiting for the first presentation." })}
         showCurationStatus={false}
       />
-      <div className="display-code-chip">
-        <span>TV</span>
-        <strong aria-label={`Paired with code ${code}`}>{code}</strong>
-        <button type="button" onClick={clearPairing}>
-          Change code
-        </button>
-      </div>
+      {!hasPresentation && (
+        <div className="display-code-chip">
+          <span>TV</span>
+          <strong aria-label={`Paired with code ${code}`}>{code}</strong>
+          <button type="button" onClick={clearPairing}>
+            Change code
+          </button>
+        </div>
+      )}
     </div>
   );
 }
