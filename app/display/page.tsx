@@ -88,6 +88,20 @@ export default function DisplayPage() {
     });
   }
 
+  function clearPairing() {
+    try { window.localStorage.removeItem(STORAGE_KEY); } catch { /* optional */ }
+    if (typeof window !== "undefined" && window.history.replaceState) {
+      const url = new URL(window.location.href);
+      url.searchParams.delete("code");
+      window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+    }
+    setCode("");
+    setDraft("");
+    setSnapshot(null);
+    setConnected(false);
+    setError("");
+  }
+
   if (!code) {
     return (
       <main className="display-pair">
@@ -127,10 +141,13 @@ export default function DisplayPage() {
         snapshot={snapshot ?? createEmptySnapshot({ status: "Connected — waiting for the first presentation." })}
         showCurationStatus={false}
       />
-      <aside className="display-code-chip" aria-label={`Paired with code ${code}`}>
+      <div className="display-code-chip">
         <span>TV</span>
-        <strong>{code}</strong>
-      </aside>
+        <strong aria-label={`Paired with code ${code}`}>{code}</strong>
+        <button type="button" onClick={clearPairing}>
+          Change code
+        </button>
+      </div>
     </div>
   );
 }

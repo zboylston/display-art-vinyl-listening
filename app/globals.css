@@ -91,9 +91,10 @@
 .display-pair__error{margin:0;color:#e2ab7c;font:500 .85rem/1.4 Inter,sans-serif}
 .display-shell{position:relative;min-height:100vh;background:#171410}
 .display-banner{position:fixed;z-index:40;top:1rem;left:50%;transform:translateX(-50%);padding:.65rem 1rem;border:1px solid rgba(255,248,238,.2);border-radius:100px;background:rgba(34,30,25,.92);color:#f8f0e4;font:500 .78rem/1.2 Inter,sans-serif;backdrop-filter:blur(10px)}
-.display-code-chip{position:fixed;z-index:20;right:1rem;bottom:1rem;display:flex;align-items:center;gap:.55rem;padding:.45rem .75rem;border:1px solid rgba(255,248,238,.16);border-radius:100px;background:rgba(20,17,14,.72);color:#d9d0c1;font:500 .68rem/1 Inter,sans-serif;letter-spacing:.12em;pointer-events:none}
+.display-code-chip{position:fixed;z-index:20;right:1rem;bottom:1rem;display:flex;align-items:center;gap:.55rem;padding:.45rem .75rem;border:1px solid rgba(255,248,238,.16);border-radius:100px;background:rgba(20,17,14,.72);color:#d9d0c1;font:500 .68rem/1 Inter,sans-serif;letter-spacing:.12em}
 .display-code-chip span{color:#e2ab7c;text-transform:uppercase}
 .display-code-chip strong{color:#fff7e9;letter-spacing:.18em}
+.display-code-chip button{margin:0;padding:.35rem .65rem;border-color:rgba(255,248,238,.28);border-radius:100px;color:#fff7e9;font:600 .62rem/1 Inter,sans-serif;letter-spacing:.08em;text-transform:uppercase}
 .display-waiting{display:grid;place-content:center;justify-items:center;gap:.8rem;min-height:100vh;padding:6vw;text-align:center;color:#f6f0e6;background:radial-gradient(circle at 50% 40%,#3a342c,#171410 70%)}
 .display-waiting h1{margin:0;font-size:clamp(2.8rem,7vw,5.5rem);color:#fffaf0}
 .display-waiting p{margin:0;max-width:28rem;color:#c9bcad;font:400 1rem/1.5 Inter,sans-serif}
