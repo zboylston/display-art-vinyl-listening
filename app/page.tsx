@@ -117,7 +117,8 @@ export default function Home() {
   const silentGainRef = useRef<GainNode | null>(null);
   const frequencyDataRef = useRef<Float32Array<ArrayBuffer> | null>(null);
   const waveformDataRef = useRef<Float32Array<ArrayBuffer> | null>(null);
-  const animationFrameRef = useRef<number | null>(null);
+  const monitorIntervalRef = useRef<number | null>(null);
+  const wakeLockRef = useRef<{ release: () => Promise<void> } | null>(null);
   const listeningRef = useRef(false);
   const recordingRef = useRef(false);
   const lastTrackKeyRef = useRef("");
@@ -160,6 +161,14 @@ export default function Home() {
   useEffect(() => { actRef.current = act; }, [act]);
   useEffect(() => { setShowAudioDebug(new URLSearchParams(window.location.search).get("debugAudio") === "1"); }, []);
   useEffect(() => {
+    // Wake locks auto-release when the tab hides — re-acquire on return.
+    const onVisibility = () => {
+      if (!document.hidden && listeningRef.current) void acquireWakeLock();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, []);
+  useEffect(() => {
     if (act === "art") { const timer = window.setTimeout(() => setAct("art-fade"), ART_INFO_HOLD_MS); return () => window.clearTimeout(timer); }
     if (act === "art-fade") { const timer = window.setTimeout(() => setAct("gallery"), ART_INFO_FADE_MS); return () => window.clearTimeout(timer); }
   }, [act]);
@@ -175,7 +184,8 @@ export default function Home() {
   }, []);
   useEffect(() => () => {
     listeningRef.current = false;
-    if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
+    if (monitorIntervalRef.current) window.clearInterval(monitorIntervalRef.current);
+    releaseWakeLock();
     streamRef.current?.getTracks().forEach((mediaTrack) => mediaTrack.stop());
     for (const pending of snapshotRequestsRef.current.values()) { window.clearTimeout(pending.timeout); pending.reject(new Error("Listening stopped.")); }
     snapshotRequestsRef.current.clear();
@@ -888,7 +898,29 @@ export default function Home() {
         void requestRecognition(nextFallbackReasonRef.current);
       } else if (!USE_AUDIO_CHANGE_DETECTOR && wallNow - lastCheckAtRef.current >= LEGACY_CHECK_MS) void requestRecognition("legacy-fallback");
     }
-    animationFrameRef.current = requestAnimationFrame(monitorSound);
+  }
+
+  /**
+   * Screen Wake Lock keeps the controller phone awake while listening — the
+   * whole detection pipeline dies if the screen locks or the tab suspends.
+   * Wake locks auto-release when the tab hides, so re-acquire on visibility
+   * return (see the visibilitychange effect below).
+   */
+  async function acquireWakeLock() {
+    const wakeLock = (navigator as Navigator & { wakeLock?: { request: (type: "screen") => Promise<{ release: () => Promise<void> }> } }).wakeLock;
+    if (!wakeLock || wakeLockRef.current) return;
+    try {
+      wakeLockRef.current = await wakeLock.request("screen");
+    } catch {
+      wakeLockRef.current = null;
+      setStatus("Listening — keep this screen awake so detection keeps running.");
+    }
+  }
+
+  function releaseWakeLock() {
+    const sentinel = wakeLockRef.current;
+    wakeLockRef.current = null;
+    void sentinel?.release().catch(() => undefined);
   }
 
   async function startListenMode() {
@@ -950,7 +982,12 @@ export default function Home() {
         ? listeningModeRef.current === "vinyl" ? "Vinyl mode is listening — identifying the record…" : "Listen mode is on — learning the sound…"
         : "Listen mode is on — compatibility capture enabled…");
       if (!worklet || !USE_AUDIO_CHANGE_DETECTOR) window.setTimeout(() => void requestRecognition("legacy-fallback"), 1_000);
+      // Interval-driven, not rAF: requestAnimationFrame stops when the tab
+      // backgrounds; setInterval throttles to ~1s but keeps detection alive.
+      if (monitorIntervalRef.current) window.clearInterval(monitorIntervalRef.current);
+      monitorIntervalRef.current = window.setInterval(monitorSound, FEATURE_INTERVAL_MS);
       monitorSound();
+      void acquireWakeLock();
     } catch (error) {
       const name = error instanceof DOMException ? error.name : "";
       if (name === "NotAllowedError" || name === "PermissionDeniedError") {
@@ -965,8 +1002,10 @@ export default function Home() {
 
   function stopListenMode() {
     listeningRef.current = false; setIsListening(false); changeRecognitionPhase("idle");
-    if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
-    animationFrameRef.current = null; streamRef.current?.getTracks().forEach((mediaTrack) => mediaTrack.stop());
+    if (monitorIntervalRef.current) window.clearInterval(monitorIntervalRef.current);
+    monitorIntervalRef.current = null;
+    releaseWakeLock();
+    streamRef.current?.getTracks().forEach((mediaTrack) => mediaTrack.stop());
     workletRef.current?.disconnect(); silentGainRef.current?.disconnect();
     for (const pending of snapshotRequestsRef.current.values()) { window.clearTimeout(pending.timeout); pending.reject(new Error("Listening stopped.")); }
     snapshotRequestsRef.current.clear(); recognitionGateRef.current.cancel();
