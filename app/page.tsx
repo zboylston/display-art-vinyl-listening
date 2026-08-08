@@ -745,7 +745,6 @@ export default function Home() {
 
   const listenControl = <button className="listen-control" onClick={isListening ? stopListenMode : startListenMode}>{isListening ? "Pause listening" : listeningMode === "vinyl" ? "Start vinyl mode" : "Start live mode"}</button>;
   const microphonePicker = <label className="microphone-picker"><span>Microphone</span><select value={selectedDeviceId} onChange={(event) => setSelectedDeviceId(event.target.value)} disabled={isListening}><option value="">System default</option>{audioInputs.map((input) => <option key={input.deviceId} value={input.deviceId}>{input.label}</option>)}</select></label>;
-  const modePicker = <div className="mode-picker" role="group" aria-label="Listening mode"><button type="button" className={listeningMode === "live" ? "is-active" : ""} onClick={() => chooseListeningMode("live")} disabled={isListening}><strong>Live</strong><span>Follow anything you play</span></button><button type="button" className={listeningMode === "vinyl" ? "is-active" : ""} onClick={() => chooseListeningMode("vinyl")} disabled={isListening}><strong>Vinyl</strong><span>Predict the album sequence</span></button></div>;
   const curationPicker = <div className="curation-picker" role="group" aria-label="Artwork curation"><button type="button" className={artCurationEnabled ? "is-active" : ""} onClick={() => chooseArtCuration(true)} disabled={isListening}>Art curation on</button><button type="button" className={!artCurationEnabled ? "is-active" : ""} onClick={() => chooseArtCuration(false)} disabled={isListening}>Music info only</button></div>;
   const vinylFolio = listeningMode === "vinyl" && vinylProgress ? vinylFolioCopy(vinylProgress) : null;
   const renderVinylFolio = (screen: "album" | "art") => vinylFolio ? <aside className={`vinyl-folio vinyl-folio--${screen}`} aria-label={`Vinyl playback: ${vinylFolio.sequence}`}><p className="vinyl-folio__label"><span />Vinyl</p>{screen === "art" && <p className="vinyl-folio__title">{currentTrack.title}</p>}<p className="vinyl-folio__sequence">{vinylFolio.sequence}</p></aside> : null;
@@ -755,9 +754,81 @@ export default function Home() {
   const debugPanel = showAudioDebug ? <aside className="audio-debug" aria-label="Audio detector diagnostics"><strong>{audioDebug.state}</strong><span>{listeningMode}</span>{activeMicrophone && <span>{activeMicrophone}</span>}<span>change {audioDebug.score.toFixed(3)}</span><span>rms {audioDebug.rms.toFixed(3)}</span><span>AudD calls {auddCalls}</span>{vinylSeconds !== undefined && <span>next {vinylSeconds}s</span>}{vinylHeartbeatSeconds !== undefined && <span>heartbeat {vinylHeartbeatSeconds}s</span>}<span>{audioDebug.reason}</span>{captureDebug && <span>{captureDebug}</span>}{lastSampleUrl && <a href={lastSampleUrl} download="music-art-last-sample.wav" onClick={(event) => event.stopPropagation()}>download sample</a>}</aside> : null;
   const transitionLabel = recognitionPhase === "suspected" ? "Possible new song" : recognitionPhase === "checking" ? "Identifying new song" : "New selection found";
   const vinylSequenceIsActive = listeningMode === "vinyl" && Boolean(vinylAlbumRef.current);
-  const transitionIndicator = !vinylSequenceIsActive && (recognitionPhase === "suspected" || recognitionPhase === "checking" || recognitionPhase === "matched") ? <aside className="transition-indicator" data-phase={recognitionPhase} aria-live="polite"><span className="signal-bars" aria-hidden="true"><i /><i /><i /><i /></span><span><small>{recognitionPhase === "suspected" ? "Listening closely" : recognitionPhase === "checking" ? "Checking the sound" : "Now playing"}</small><strong>{transitionLabel}</strong></span></aside> : null;
+  const firstListenActive = isListening && !hasLiveTrack && recognitionPhase !== "matched";
+  const transitionIndicator = !vinylSequenceIsActive && !firstListenActive && (recognitionPhase === "suspected" || recognitionPhase === "checking" || recognitionPhase === "matched") ? <aside className="transition-indicator" data-phase={recognitionPhase} aria-live="polite"><span className="signal-bars" aria-hidden="true"><i /><i /><i /><i /></span><span><small>{recognitionPhase === "suspected" ? "Listening closely" : recognitionPhase === "checking" ? "Checking the sound" : "Now playing"}</small><strong>{transitionLabel}</strong></span></aside> : null;
 
-  if (act === "ready") return <main className="ready"><p className="eyebrow">Needle & Frame</p><h1>{hasLiveTrack ? "Listen again" : "Listen and identify"}</h1><p>{hasLiveTrack ? `Last identified: ${currentTrack.title} — ${currentTrack.artist}` : listeningMode === "vinyl" ? "Identify the record once, then let the album unfold." : "Identify a song, then discover a matching artwork."}</p>{modePicker}{curationPicker}{microphonePicker}{listenControl}<small>{status}</small>{transitionIndicator}{debugPanel}</main>;
+  const firstListenKicker = recognitionPhase === "suspected" ? "Heard a change" : recognitionPhase === "checking" ? "Checking the sound" : "Listening";
+  const firstListenTitle = recognitionPhase === "checking" ? "Identifying" : listeningMode === "vinyl" ? "Reading the record" : "Listening";
+  const firstListenCopy = recognitionPhase === "checking"
+    ? "Matching the capture against the archive."
+    : recognitionPhase === "suspected"
+      ? "A change is taking shape — holding on a fresh capture."
+      : listeningMode === "vinyl"
+        ? "The needle is on the record. Once it is identified, the album unfolds on its own."
+        : "Keeping a short window of sound in memory. About fifteen seconds usually does it.";
+  const firstListenScreen = (
+    <main className="ready is-listening" aria-live="polite">
+      <section className="first-listen">
+        <p className="eyebrow">{firstListenKicker}</p>
+        <div className="first-listen__emblem" data-phase={recognitionPhase} aria-hidden="true">
+          <span className="first-listen__ring first-listen__ring--outer" />
+          <span className="first-listen__ring first-listen__ring--middle" />
+          <span className="first-listen__ring first-listen__ring--inner" />
+          <span className="first-listen__core" />
+        </div>
+        <h1>{firstListenTitle}</h1>
+        <p className="first-listen__copy">{firstListenCopy}</p>
+        {listenControl}
+        <small>{status}</small>
+      </section>
+      {debugPanel}
+    </main>
+  );
+
+  const readyCopy = hasLiveTrack
+    ? `Last identified: ${currentTrack.title} — ${currentTrack.artist}`
+    : listeningMode === "vinyl"
+      ? "Identify the record once, then let the album unfold."
+      : "Identify a song, then let a matching artwork find it.";
+  const readyScreen = (
+    <main className="ready">
+      <header className="ready__masthead"><span className="ready__mark">N&amp;F</span><span>Needle &amp; Frame</span></header>
+      <section className="ready__stage">
+        <div className="ready__intro">
+          <p className="eyebrow">An art-first listening room</p>
+          <h1>{hasLiveTrack ? "Listen again" : "Music in, art out."}</h1>
+          <p>{readyCopy}</p>
+          <div className="ready__cta">
+            {listenControl}
+            <span className="ready__hint">About fifteen seconds of sound is enough for the first match.</span>
+          </div>
+        </div>
+        <div className="ready__side">
+          <div className="ready__modes" aria-label="Listening mode">
+            <button type="button" className={`ready__mode${listeningMode === "live" ? " is-active" : ""}`} onClick={() => chooseListeningMode("live")} disabled={isListening}>
+              <span className="ready__mode-kicker">Live</span>
+              <strong>Follow anything you play</strong>
+              <span>Reacts to whatever is in the room.</span>
+            </button>
+            <button type="button" className={`ready__mode${listeningMode === "vinyl" ? " is-active" : ""}`} onClick={() => chooseListeningMode("vinyl")} disabled={isListening}>
+              <span className="ready__mode-kicker">Vinyl</span>
+              <strong>Predict the album sequence</strong>
+              <span>Identify once, then the record leads.</span>
+            </button>
+          </div>
+          <div className="ready__settings">
+            {curationPicker}
+            {microphonePicker}
+          </div>
+        </div>
+      </section>
+      <footer className="ready__footer"><small>{status}</small></footer>
+      {transitionIndicator}
+      {debugPanel}
+    </main>
+  );
+
+  if (act === "ready") return firstListenActive ? firstListenScreen : readyScreen;
   if (act === "track" || act === "handoff") return <main className={`track-screen${act === "handoff" ? " is-handing-off" : ""}`}>{act === "handoff" && <div className="handoff-art" aria-hidden="true"><img className="handoff-backdrop" src={art.image} alt="" /><img className="handoff-image" src={art.image} alt="" /></div>}<div className="frame" key={identityKey(currentTrack)}><section className="album-panel"><div className="album-mat"><div className={`album-cover${currentTrack.albumCover ? "" : " is-missing"}`} style={{ backgroundImage: currentTrack.albumCover ? `url(${currentTrack.albumCover})` : undefined }} role="img" aria-label={currentTrack.albumCover ? `${currentTrack.album} album artwork` : "Album artwork unavailable"}>{!currentTrack.albumCover && <span>{currentTrack.album.slice(0, 1)}</span>}</div></div></section><section className="now-playing"><p className="eyebrow now-label"><span />Now playing</p><h1 className={`artist-name${currentTrack.artist.length > 20 ? " is-long" : ""}`}>{currentTrack.artist}</h1><h2 className={`song-title${currentTrack.title.length > 26 ? " is-long" : ""}`}>{currentTrack.title}</h2><div className="album-details"><p className="field-label">From the album</p><p className="album-name"><em>{currentTrack.album}</em><span className="release-year"> · {currentTrack.year}</span></p></div></section>{renderVinylFolio("album")}{artCurationEnabled && <p className="curation-status" role="status"><span aria-hidden="true" />{status}</p>}</div>{transitionIndicator}{debugPanel}</main>;
   if (act === "art" || act === "art-fade") return <main className={`art-intro${act === "art-fade" ? " is-info-fading" : ""}`} style={{ width: "min(100vw, calc(100vh * 16 / 9))", height: "min(100vh, calc(100vw * 9 / 16))", minHeight: 0, margin: "auto", aspectRatio: "16 / 9" }}><img className="art-image" style={{ position: "absolute", zIndex: 0, inset: "-3%", width: "106%", height: "106%", filter: "blur(26px) brightness(.38)", transform: "scale(1.06)" }} src={art.image} alt="" /><img className="art-image gallery-artwork" style={{ position: "absolute", zIndex: 1, inset: 0, objectFit: "cover" }} src={art.image} alt="" /><div className="art-overlay" style={{ zIndex: 2 }} /><section style={{ zIndex: 3 }}><p className="eyebrow">Selected artwork</p><h1 className={`art-title${art.title.length > 34 ? " is-long" : ""}`}><em>{art.title}</em></h1><h2>{art.artist}</h2><p>{art.date} · {art.museum}</p></section>{renderVinylFolio("art")}{transitionIndicator}{debugPanel}</main>;
   return <main className={`gallery${act === "return" ? " is-returning" : ""}`} style={{ width: "min(100vw, calc(100vh * 16 / 9))", height: "min(100vh, calc(100vw * 9 / 16))", minHeight: 0, margin: "auto", aspectRatio: "16 / 9" }} onClick={() => setAct("ready")} aria-label={`${art.title} by ${art.artist}`}><img className="art-image" style={{ position: "absolute", zIndex: 0, inset: "-3%", width: "106%", height: "106%", filter: "blur(26px) brightness(.38)", transform: "scale(1.06)" }} src={art.image} alt="" /><img className="art-image gallery-artwork" style={{ position: "absolute", zIndex: 1, inset: 0, objectFit: "cover" }} src={art.image} alt={`${art.title} by ${art.artist}`} /><div className="gallery-overlay" aria-hidden="true" />{renderVinylFolio("art")}{transitionIndicator}{debugPanel}</main>;
