@@ -1,17 +1,31 @@
 import { NextResponse } from "next/server";
 import { largeAlbumArtwork, orderedCatalogAlbum, selectCatalogTrack, type CatalogTrack } from "../../lib/track-metadata";
 import { pickGenreLabel } from "../../lib/visual-brief";
+import { recognizeWithAudd } from "../../lib/recognition/audd";
+import { recognizeWithShazam } from "../../lib/recognition/shazam";
+import type { ProviderMatch, RecognitionProvider } from "../../lib/recognition/types";
 
 const MAX_CAPTURE_BYTES = 3_000_000;
 const MIN_CAPTURE_BYTES = 8_000;
 const ALLOWED_TYPES = new Set(["audio/wav", "audio/webm", "audio/mp4", "audio/x-m4a"]);
 
-function record(value: unknown): Record<string, unknown> {
-  return value !== null && typeof value === "object" ? value as Record<string, unknown> : {};
-}
-
 function text(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function msToTimecode(ms: number | undefined): string | undefined {
+  if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0) return undefined;
+  const totalSeconds = Math.round(ms / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+function resolveProvider(requested: FormDataEntryValue | null): RecognitionProvider {
+  const fromForm = typeof requested === "string" ? requested.trim().toLowerCase() : "";
+  if (fromForm === "audd" || fromForm === "shazam") return fromForm;
+  const fromEnv = (process.env.RECOGNITION_PROVIDER ?? "audd").trim().toLowerCase();
+  return fromEnv === "shazam" ? "shazam" : "audd";
 }
 
 async function catalogSearch(artist: string, title: string): Promise<CatalogTrack[]> {
@@ -62,58 +76,72 @@ async function catalogAlbum(collectionId: number) {
   }
 }
 
-export async function POST(request: Request) {
+async function identifyCapture(audio: File, provider: RecognitionProvider) {
+  if (provider === "shazam") {
+    const mime = (audio.type || "").split(";")[0];
+    if (mime && mime !== "audio/wav") {
+      console.info(`[recognize] Shazam requires WAV; falling back to AudD for type=${mime || "unknown"}`);
+      const token = process.env.AUDD_API_TOKEN;
+      if (!token) {
+        return {
+          provider: "audd" as const,
+          outcome: {
+            kind: "error" as const,
+            error: "AudD is not configured for non-WAV fallback. Add AUDD_API_TOKEN to .env.local.",
+            status: 503,
+          },
+        };
+      }
+      return { provider: "audd" as const, outcome: await recognizeWithAudd(audio, token) };
+    }
+    return { provider, outcome: await recognizeWithShazam(await audio.arrayBuffer()) };
+  }
+
   const token = process.env.AUDD_API_TOKEN;
-  if (!token) return NextResponse.json({ error: "AudD is not configured. Add AUDD_API_TOKEN to .env.local." }, { status: 503 });
+  if (!token) {
+    return {
+      provider,
+      outcome: {
+        kind: "error" as const,
+        error: "AudD is not configured. Add AUDD_API_TOKEN to .env.local.",
+        status: 503,
+      },
+    };
+  }
+  return { provider, outcome: await recognizeWithAudd(audio, token) };
+}
+
+export async function POST(request: Request) {
   try {
     const input = await request.formData().catch(() => null);
     if (!input) return NextResponse.json({ error: "Expected a multipart audio capture." }, { status: 400 });
     const audio = input.get("audio");
     const vinylMode = input.get("mode") === "vinyl";
+    let provider = resolveProvider(input.get("provider"));
     if (!(audio instanceof File)) return NextResponse.json({ error: "Missing audio capture." }, { status: 400 });
     if (audio.size < MIN_CAPTURE_BYTES) return NextResponse.json({ error: "Audio capture is too short." }, { status: 400 });
     if (audio.size > MAX_CAPTURE_BYTES) return NextResponse.json({ error: "Audio capture is too large." }, { status: 413 });
     if (audio.type && !ALLOWED_TYPES.has(audio.type.split(";")[0])) return NextResponse.json({ error: "Unsupported audio format." }, { status: 415 });
-    console.info(`[recognize] capture bytes=${audio.size} type=${audio.type || "unknown"}`);
-    const form = new FormData();
-    form.append("api_token", token);
-    // One metadata provider keeps AudD's response smaller and faster than requesting both.
-    form.append("return", "apple_music");
-    const filename = audio.type.includes("wav") ? "capture.wav" : audio.type.includes("mp4") ? "capture.m4a" : "capture.webm";
-    form.append("file", audio, filename);
-    const response = await fetch("https://api.audd.io/", { method: "POST", body: form, signal: AbortSignal.timeout(30000) });
-    const data = record(await response.json());
-    const result = record(data.result);
-    console.info(`[recognize] AudD response http=${response.status} status=${text(data.status) ?? "unknown"} matched=${Boolean(data.result)} title=${text(result.title) ?? "none"}`);
-    if (!response.ok || data.status === "error") {
-      const error = record(data.error);
-      const detail = text(error.error_message) ?? text(error.message) ?? "AudD recognition failed.";
-      const errorCode = typeof error.error_code === "number" ? error.error_code : Number(error.error_code);
-      // AudD 300 = could not fingerprint the capture (silence, noise, unsupported codec).
-      // Treat as a soft miss so the UI does not look like a server outage.
-      if (errorCode === 300) {
-        console.info(`[recognize] AudD fingerprint miss: ${detail}`);
-        return NextResponse.json({ result: null, warning: "Could not hear the music clearly enough to identify." });
-      }
-      const code = Number.isFinite(errorCode) ? ` (AudD ${errorCode})` : !response.ok ? ` (HTTP ${response.status})` : "";
-      console.error(`[recognize] AudD failure${code}: ${detail}`);
-      return NextResponse.json({ error: `${detail}${code}` }, { status: 502 });
-    }
-    if (!data.result) return NextResponse.json({ result: null });
+    console.info(`[recognize] provider=${provider} capture bytes=${audio.size} type=${audio.type || "unknown"}`);
 
-    const apple = record(result.apple_music);
-    const playParams = record(apple.playParams);
-    const artwork = record(apple.artwork);
-    const artworkTemplate = text(artwork.url);
-    const artist = text(result.artist) ?? "Unknown artist";
-    const title = text(result.title) ?? "Unknown track";
-    const appleTrackId = text(apple.id) ?? text(playParams.id);
-    const preferredAlbum = text(apple.albumName) ?? text(result.album);
-    const appleGenres = Array.isArray(apple.genreNames)
-      ? apple.genreNames.filter((item): item is string => typeof item === "string")
-      : [];
+    const identified = await identifyCapture(audio, provider);
+    provider = identified.provider;
+    const outcome = identified.outcome;
+    if (outcome.kind === "error") return NextResponse.json({ error: outcome.error, provider }, { status: outcome.status });
+    if (outcome.kind === "miss") {
+      return NextResponse.json({
+        result: null,
+        provider,
+        ...(outcome.warning ? { warning: outcome.warning } : {}),
+      });
+    }
+
+    const match: ProviderMatch = outcome.match;
+    const artist = match.artist;
+    const title = match.title;
+    const preferredAlbum = match.album;
     const [catalogById, catalogCandidates] = await Promise.all([
-      catalogTrackById(appleTrackId),
+      catalogTrackById(match.appleTrackId),
       catalogSearch(artist, title),
     ]);
     const catalog = selectCatalogTrack(
@@ -122,39 +150,47 @@ export async function POST(request: Request) {
       [...(catalogById ? [catalogById] : []), ...catalogCandidates],
       preferredAlbum,
     );
-    const genre = pickGenreLabel(appleGenres[0], appleGenres[1], catalog?.primaryGenreName, catalogById?.primaryGenreName);
-    const discoveredAlbumTracks = vinylMode && catalog?.collectionId ? await catalogAlbum(catalog.collectionId) : [];
+    // Prefer Shazam's album adam id when iTunes search picked a different collection.
+    const collectionId = catalog?.collectionId
+      ?? (match.appleAlbumId && /^\d+$/.test(match.appleAlbumId) ? Number(match.appleAlbumId) : undefined);
+    const genre = pickGenreLabel(match.genres[0], match.genres[1], catalog?.primaryGenreName, catalogById?.primaryGenreName);
+    const discoveredAlbumTracks = vinylMode && collectionId ? await catalogAlbum(collectionId) : [];
     // A one-track result is generally a single, not a usable vinyl sequence. Keep
     // recognition live in that case instead of falsely locking at “Track 1 of 1”.
     const albumTracks = discoveredAlbumTracks.length > 1 ? discoveredAlbumTracks : [];
     const sequenceIndex = albumTracks.findIndex((track) => (
       (Boolean(catalog?.trackId) && track.trackId === catalog?.trackId)
+      || (Boolean(match.appleTrackId) && track.trackId === Number(match.appleTrackId))
       || (Boolean(catalog) && track.trackName === catalog?.trackName && track.artistName === catalog?.artistName)
     ));
     const albumSequence = albumTracks.map((track) => ({
       artist: track.artistName ?? artist,
       title: track.trackName ?? "Unknown track",
-      album: track.collectionName ?? catalog?.collectionName ?? "Album unknown",
-      year: (track.releaseDate ?? catalog?.releaseDate ?? "").slice(0, 4),
-      albumCover: largeAlbumArtwork(track.artworkUrl100 ?? catalog?.artworkUrl100),
+      album: track.collectionName ?? catalog?.collectionName ?? preferredAlbum ?? "Album unknown",
+      year: (track.releaseDate ?? catalog?.releaseDate ?? match.releaseDate ?? "").slice(0, 4),
+      albumCover: largeAlbumArtwork(track.artworkUrl100 ?? catalog?.artworkUrl100 ?? match.artworkUrl),
       durationMs: track.trackTimeMillis,
       collectionId: track.collectionId,
       trackNumber: track.trackNumber,
       discNumber: track.discNumber,
       genre,
     }));
-    console.info(`[recognize] mode=${vinylMode ? "vinyl" : "live"} catalog=${catalog?.collectionId ?? "none"} sequence=${albumSequence.length} index=${sequenceIndex}`);
+    const durationMs = match.durationMs ?? catalog?.trackTimeMillis ?? catalogById?.trackTimeMillis;
+    const timecodeMs = match.timecodeMs;
+    console.info(`[recognize] provider=${provider} mode=${vinylMode ? "vinyl" : "live"} catalog=${collectionId ?? "none"} sequence=${albumSequence.length} index=${sequenceIndex}`);
     return NextResponse.json({
+      provider,
       result: {
         artist,
         title,
-        album: text(catalog?.collectionName) ?? text(apple.albumName) ?? text(result.album) ?? "Album unknown",
-        releaseDate: text(catalog?.releaseDate) ?? text(apple.releaseDate) ?? text(result.release_date) ?? "",
-        timecode: text(result.timecode),
-        isrc: text(apple.isrc),
-        durationMs: typeof apple.durationInMillis === "number" ? apple.durationInMillis : undefined,
-        albumCover: largeAlbumArtwork(text(catalog?.artworkUrl100) ?? artworkTemplate),
-        collectionId: catalog?.collectionId,
+        album: text(catalog?.collectionName) ?? preferredAlbum ?? "Album unknown",
+        releaseDate: text(catalog?.releaseDate) ?? match.releaseDate ?? "",
+        timecode: match.timecode ?? msToTimecode(timecodeMs),
+        timecodeMs,
+        isrc: match.isrc,
+        durationMs,
+        albumCover: largeAlbumArtwork(text(catalog?.artworkUrl100) ?? match.artworkUrl),
+        collectionId,
         trackNumber: catalog?.trackNumber,
         discNumber: catalog?.discNumber,
         genre,

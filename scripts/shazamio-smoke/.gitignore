@@ -1,0 +1,7 @@
+.venv/
+*.ogg
+*.wav
+ffmpeg
+ffprobe
+__pycache__/
+last-*.json
