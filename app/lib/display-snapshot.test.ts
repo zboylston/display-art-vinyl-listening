@@ -4,6 +4,7 @@ import {
   isDisplayCode,
   normalizeDisplayCode,
   parseDisplaySnapshot,
+  sanitizeDisplayStatus,
 } from "./display-snapshot";
 
 describe("display codes", () => {
@@ -17,6 +18,14 @@ describe("display codes", () => {
     const code = generateDisplayCode(() => 0);
     expect(code).toHaveLength(6);
     expect(isDisplayCode(code)).toBe(true);
+  });
+});
+
+describe("sanitizeDisplayStatus", () => {
+  it("hides recognition failures from the TV waiting screen", () => {
+    expect(sanitizeDisplayStatus("Recognition error 502: AudD recognition failed.", true))
+      .toBe("Listening for the next piece…");
+    expect(sanitizeDisplayStatus("Artwork selected", false)).toBe("Artwork selected");
   });
 });
 
@@ -49,5 +58,15 @@ describe("parseDisplaySnapshot", () => {
     expect(snapshot?.act).toBe("gallery");
     expect(snapshot?.currentTrack).toBeNull();
     expect(parseDisplaySnapshot(null)).toBeNull();
+  });
+
+  it("scrubs stuck recognition errors out of waiting snapshots", () => {
+    const snapshot = parseDisplaySnapshot({
+      act: "ready",
+      listeningMode: "vinyl",
+      isListening: true,
+      status: "Recognition error 502: AudD recognition failed.",
+    });
+    expect(snapshot?.status).toBe("Listening for the next piece…");
   });
 });

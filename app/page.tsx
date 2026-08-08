@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { PresentationStage } from "./components/presentation-stage";
 import { AudioChangeDetector, rmsFromSamples, spectrumBandsFromDb, type DetectorState } from "./lib/audio-change-detector";
 import type { DisplaySnapshot } from "./lib/display-snapshot";
+import { sanitizeDisplayStatus } from "./lib/display-snapshot";
 import { canonicalTrackKey, INITIAL_DISCOVERY_CAPTURE_MS, noMatchRetryDelay, RecognitionGate, textTrackKey } from "./lib/recognition";
 import { parseRecentArtworkIds, pushRecentArtworkId, shouldRefreshCachedArtwork } from "./lib/recent-artwork";
 import { planVinylHeartbeats } from "./lib/vinyl-heartbeats";
@@ -810,15 +811,11 @@ export default function Home() {
 
   function buildDisplaySnapshot(): DisplaySnapshot {
     const live = hasLiveTrack || isPresentationAct(act);
-    // Keep recognition failures on the controller; the TV should not mirror AudD/HTTP errors.
-    const displayStatus = /recognition error|audd|could not hear the music clearly/i.test(status)
-      ? (isListening ? "Listening for the next piece…" : "Ready when you are.")
-      : status;
     return {
       act,
       listeningMode,
       isListening,
-      status: displayStatus,
+      status: sanitizeDisplayStatus(status, isListening),
       currentTrack: live ? {
         artist: currentTrack.artist,
         title: currentTrack.title,

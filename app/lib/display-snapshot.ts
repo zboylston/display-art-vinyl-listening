@@ -71,17 +71,27 @@ export function isPresentationAct(act: PresentationAct) {
   return act === "track" || act === "handoff" || act === "art" || act === "art-fade" || act === "gallery" || act === "return";
 }
 
+/** Strip controller recognition failures so the TV never mirrors AudD/HTTP errors. */
+export function sanitizeDisplayStatus(status: string, isListening = false) {
+  if (/recognition error|\b502\b|\b503\b|audd|fingerprint|could not hear the music clearly/i.test(status)) {
+    return isListening ? "Listening for the next piece…" : "Ready when you are.";
+  }
+  return status;
+}
+
 export function parseDisplaySnapshot(value: unknown): DisplaySnapshot | null {
   if (!value || typeof value !== "object") return null;
   const raw = value as Record<string, unknown>;
   const act = raw.act;
   if (typeof act !== "string" || !isKnownAct(act)) return null;
   const listeningMode = raw.listeningMode === "vinyl" ? "vinyl" : "live";
+  const isListening = Boolean(raw.isListening);
+  const status = typeof raw.status === "string" ? raw.status : "";
   return {
     act,
     listeningMode,
-    isListening: Boolean(raw.isListening),
-    status: typeof raw.status === "string" ? raw.status : "",
+    isListening,
+    status: sanitizeDisplayStatus(status, isListening),
     currentTrack: parseTrack(raw.currentTrack),
     artwork: parseArtwork(raw.artwork),
     vinylProgress: parseVinylProgress(raw.vinylProgress),
