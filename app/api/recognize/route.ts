@@ -87,7 +87,17 @@ export async function POST(request: Request) {
     console.info(`[recognize] AudD response http=${response.status} status=${text(data.status) ?? "unknown"} matched=${Boolean(data.result)} title=${text(result.title) ?? "none"}`);
     if (!response.ok || data.status === "error") {
       const error = record(data.error);
-      return NextResponse.json({ error: text(error.error_message) ?? "AudD recognition failed." }, { status: 502 });
+      const detail = text(error.error_message) ?? text(error.message) ?? "AudD recognition failed.";
+      const errorCode = typeof error.error_code === "number" ? error.error_code : Number(error.error_code);
+      // AudD 300 = could not fingerprint the capture (silence, noise, unsupported codec).
+      // Treat as a soft miss so the UI does not look like a server outage.
+      if (errorCode === 300) {
+        console.info(`[recognize] AudD fingerprint miss: ${detail}`);
+        return NextResponse.json({ result: null, warning: "Could not hear the music clearly enough to identify." });
+      }
+      const code = Number.isFinite(errorCode) ? ` (AudD ${errorCode})` : !response.ok ? ` (HTTP ${response.status})` : "";
+      console.error(`[recognize] AudD failure${code}: ${detail}`);
+      return NextResponse.json({ error: `${detail}${code}` }, { status: 502 });
     }
     if (!data.result) return NextResponse.json({ result: null });
 

@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { PresentationStage } from "./components/presentation-stage";
 import { AudioChangeDetector, rmsFromSamples, spectrumBandsFromDb, type DetectorState } from "./lib/audio-change-detector";
 import type { DisplaySnapshot } from "./lib/display-snapshot";
+import { sanitizeDisplayStatus } from "./lib/display-snapshot";
 import { canonicalTrackKey, INITIAL_DISCOVERY_CAPTURE_MS, noMatchRetryDelay, RecognitionGate, textTrackKey } from "./lib/recognition";
 import { parseRecentArtworkIds, pushRecentArtworkId, shouldRefreshCachedArtwork } from "./lib/recent-artwork";
 import { planVinylHeartbeats } from "./lib/vinyl-heartbeats";
@@ -427,7 +428,13 @@ export default function Home() {
         return "error";
       }
       if (!data.result) {
-        if (shouldAnnounceRecognitionStatus(reason)) setStatus(listeningRef.current ? "No confident match yet — still listening…" : "No match found.");
+        if (shouldAnnounceRecognitionStatus(reason)) {
+          setStatus(
+            typeof data.warning === "string"
+              ? data.warning
+              : listeningRef.current ? "No confident match yet — still listening…" : "No match found.",
+          );
+        }
         return "none";
       }
       const track: Track = {
@@ -538,15 +545,32 @@ export default function Home() {
       if (shouldAnnounceRecognitionStatus(reason)) setStatus("Checking the song…");
       // After a real gap, exclude the preceding track from the upload. Five
       // post-gap seconds are enough for AudD and avoid a mixed-song sample.
-      const discoveryRetry = listeningModeRef.current === "vinyl" && !lastTrackKeyRef.current && consecutiveNoMatchRef.current > 0;
-      const discoveryRetrySeconds = discoveryRetry ? 24 : SNAPSHOT_SECONDS;
-      const snapshotSeconds = reason === "transition-confirmation" ? 10 : reason === "music-resumed" ? 5 : discoveryRetrySeconds;
+      const vinylDiscovery = listeningModeRef.current === "vinyl" && !lastTrackKeyRef.current;
+      const discoveryRetry = vinylDiscovery && consecutiveNoMatchRef.current > 0;
+      // Vinyl first-lock needs a long, EQ'd room capture; digital streams usually match on 15s.
+      const vinylDiscoverySeconds = 24;
+      const snapshotSeconds = reason === "transition-confirmation"
+        ? 10
+        : reason === "music-resumed"
+          ? 5
+          : vinylDiscovery
+            ? vinylDiscoverySeconds
+            : SNAPSHOT_SECONDS;
       const snapshot = await takeRingSnapshot(snapshotSeconds);
       const capturedAt = Date.now();
       if (snapshot.samples.length < snapshot.sampleRate * 4) throw new Error("Waiting for a longer music sample.");
-      const prepared = prepareRecognitionAudio(snapshot.samples, snapshot.sampleRate, discoveryRetry);
+      const prepared = prepareRecognitionAudio(
+        snapshot.samples,
+        snapshot.sampleRate,
+        vinylDiscovery,
+        vinylDiscovery ? 0.14 : 0.12,
+        vinylDiscovery ? 18 : 12,
+      );
+      if (prepared.inputRms < 0.006) {
+        throw new Error("Music is too quiet for the mic — hold the phone nearer the speakers and turn it up a bit.");
+      }
       const audio = encodeMonoWav(prepared.samples, snapshot.sampleRate);
-      setCaptureDebug(`clip ${(prepared.samples.length / snapshot.sampleRate).toFixed(1)}s${prepared.conditioned ? " · EQ" : ""} · in ${prepared.inputRms.toFixed(3)} · gain ${prepared.gain.toFixed(1)}× · out ${prepared.outputRms.toFixed(3)}`);
+      setCaptureDebug(`clip ${(prepared.samples.length / snapshot.sampleRate).toFixed(1)}s${prepared.conditioned ? " · EQ" : ""}${discoveryRetry ? " · retry" : ""} · in ${prepared.inputRms.toFixed(3)} · gain ${prepared.gain.toFixed(1)}× · out ${prepared.outputRms.toFixed(3)}`);
       if (showAudioDebug) {
         if (lastSampleUrlRef.current) URL.revokeObjectURL(lastSampleUrlRef.current);
         const sampleUrl = URL.createObjectURL(audio);
@@ -752,7 +776,7 @@ export default function Home() {
     setListeningMode(mode);
     if (mode === "live") resetVinylPrediction();
     setStatus(mode === "vinyl"
-      ? "Vinyl mode will identify once, learn the album order, and prepare each transition."
+      ? "Vinyl mode will identify once — hold the phone near the speakers for the first lock, then the album can unfold."
       : "Live mode reacts to whatever you play.");
   }
 
@@ -791,7 +815,7 @@ export default function Home() {
       act,
       listeningMode,
       isListening,
-      status,
+      status: sanitizeDisplayStatus(status, isListening),
       currentTrack: live ? {
         artist: currentTrack.artist,
         title: currentTrack.title,
