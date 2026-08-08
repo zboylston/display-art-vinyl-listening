@@ -2,8 +2,30 @@
 export const VINYL_GAP_LATCH_EXPIRE_MS = 15_000;
 /** Mid-track quiet long enough to treat the record as stopped, not paused. */
 export const VINYL_SUSTAINED_SILENCE_PARK_MS = 20_000;
-/** After any predicted advance, confirm the next song actually started. */
-export const VINYL_ADVANCE_VERIFY_MS = 12_000;
+/**
+ * After a gap advance, wait this long before the verify snapshot so the ring
+ * holds ~10s of post-gap audio (resume already required ~5s audible).
+ */
+export const VINYL_ADVANCE_VERIFY_MS = 5_000;
+/** Snapshot length for post-advance verify and post-silence end-confirm. */
+export const VINYL_VERIFY_SNAPSHOT_SECONDS = 10;
+/**
+ * Gapless (already audible at the boundary): wait this long past the predicted
+ * end before identifying — long enough for a mostly-new-track ring window,
+ * short enough that the display does not feel stuck.
+ */
+export const VINYL_END_CONFIRM_GAPLESS_CAPTURE_MS = 4_000;
+/** After silence past the end timer, collect this much audible audio before identifying. */
+export const VINYL_END_CONFIRM_CAPTURE_MS = 10_000;
+/** Snapshot length when identifying a gapless end-confirm (favor post-boundary audio). */
+export const VINYL_END_CONFIRM_GAPLESS_SNAPSHOT_SECONDS = 5;
+/** How long to wait for sound after the end timer before parking. */
+export const VINYL_END_CONFIRM_TIMEOUT_MS = 15_000;
+
+/** Capture window for end-confirm: shorter when music never went silent (gapless). */
+export function endConfirmCaptureMs(gapless: boolean) {
+  return gapless ? VINYL_END_CONFIRM_GAPLESS_CAPTURE_MS : VINYL_END_CONFIRM_CAPTURE_MS;
+}
 
 export type VinylGapLatch = {
   armedAt: number;
@@ -36,9 +58,9 @@ export function shouldAdvanceOnGapResume(gapPending: boolean, event: string | nu
 }
 
 /**
- * Blind timer/spectral advances are only safe while music has been continuous.
- * Once we've heard silence (gap pending), parked, or paused, wait for confirmed
- * music-resumed / recognition instead of trusting the clock or spectrum.
+ * Low-level pause/park/gap gate used by gap advances and end-confirm arming.
+ * Blind timer/spectral album walks are no longer allowed — see
+ * `silenceFirstAllowsBlindBoundaryAdvance`.
  */
 export function canPredictiveAdvance(input: {
   parked: boolean;
@@ -51,6 +73,61 @@ export function canPredictiveAdvance(input: {
   if (input.parked || input.paused || input.gapPending) return false;
   if (input.requireStable && input.detectorState !== "stable") return false;
   return true;
+}
+
+/** Silence-first policy: never walk the album on a clock/spectrum alone. */
+export function silenceFirstAllowsBlindBoundaryAdvance() {
+  return false;
+}
+
+/** Arm end-of-song identify once we pass the predicted boundary without a gap handoff. */
+export function shouldArmEndConfirm(input: {
+  pastBoundary: boolean;
+  parked: boolean;
+  gapPending: boolean;
+  pendingVerify: boolean;
+  endConfirmPending: boolean;
+}) {
+  return (
+    input.pastBoundary
+    && !input.parked
+    && !input.gapPending
+    && !input.pendingVerify
+    && !input.endConfirmPending
+  );
+}
+
+/**
+ * Fire end-confirm once we have collected enough audible post-boundary audio.
+ * If sound never returns, `shouldTimeoutEndConfirm` parks instead.
+ */
+export function shouldFireEndConfirm(input: {
+  endConfirmPending: boolean;
+  endConfirmArmedAt: number;
+  now: number;
+  audible: boolean;
+  /** True when capture started while music was already playing (gapless). */
+  gapless?: boolean;
+  captureMs?: number;
+}) {
+  if (!input.endConfirmPending || !input.audible || !input.endConfirmArmedAt) return false;
+  const captureMs = input.captureMs ?? endConfirmCaptureMs(Boolean(input.gapless));
+  return input.now - input.endConfirmArmedAt >= captureMs;
+}
+
+export function shouldTimeoutEndConfirm(input: {
+  endConfirmPending: boolean;
+  endConfirmArmedAt: number;
+  /** Used when we armed while silent and have not started the audible capture clock. */
+  boundaryAt?: number;
+  now: number;
+  audible: boolean;
+  timeoutMs?: number;
+}) {
+  if (!input.endConfirmPending || input.audible) return false;
+  const startedAt = input.endConfirmArmedAt || input.boundaryAt || 0;
+  if (!startedAt) return false;
+  return input.now - startedAt >= (input.timeoutMs ?? VINYL_END_CONFIRM_TIMEOUT_MS);
 }
 
 /** A predicted advance whose background verify returned no music should undo the guess. */

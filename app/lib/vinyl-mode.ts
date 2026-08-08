@@ -1,4 +1,5 @@
-export const VINYL_BOUNDARY_EARLY_MS = 12_000;
+/** Open the near-end silence watch this far before the predicted boundary. */
+export const VINYL_BOUNDARY_EARLY_MS = 20_000;
 export const VINYL_BOUNDARY_LATE_MS = 45_000;
 /** Ignore heartbeat re-anchors that jump the predicted ending by more than this. */
 export const VINYL_BOUNDARY_REFINE_MAX_DELTA_MS = 20_000;
