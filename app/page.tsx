@@ -566,9 +566,6 @@ export default function Home() {
         vinylDiscovery ? 0.14 : 0.12,
         vinylDiscovery ? 18 : 12,
       );
-      if (prepared.inputRms < 0.006) {
-        throw new Error("Music is too quiet for the mic — hold the phone nearer the speakers and turn it up a bit.");
-      }
       const audio = encodeMonoWav(prepared.samples, snapshot.sampleRate);
       setCaptureDebug(`clip ${(prepared.samples.length / snapshot.sampleRate).toFixed(1)}s${prepared.conditioned ? " · EQ" : ""}${discoveryRetry ? " · retry" : ""} · in ${prepared.inputRms.toFixed(3)} · gain ${prepared.gain.toFixed(1)}× · out ${prepared.outputRms.toFixed(3)}`);
       if (showAudioDebug) {
