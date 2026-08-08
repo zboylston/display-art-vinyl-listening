@@ -40,6 +40,16 @@ export default function DisplayPage() {
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) {
+        // Expired / unknown saved codes should return to the pairing form, not hang forever.
+        if (response.status === 404) {
+          try { window.localStorage.removeItem(STORAGE_KEY); } catch { /* optional */ }
+          setCode("");
+          setDraft("");
+          setSnapshot(null);
+          setConnected(false);
+          setError("That pairing expired. Enter a new code from the controller.");
+          return;
+        }
         setConnected(false);
         setError(typeof payload.error === "string" ? payload.error : "Display session unavailable.");
         return;
