@@ -1,12 +1,14 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { PresentationStage } from "./components/presentation-stage";
 import { AudioChangeDetector, rmsFromSamples, spectrumBandsFromDb, type DetectorState } from "./lib/audio-change-detector";
+import type { DisplaySnapshot } from "./lib/display-snapshot";
 import { canonicalTrackKey, INITIAL_DISCOVERY_CAPTURE_MS, noMatchRetryDelay, RecognitionGate, textTrackKey } from "./lib/recognition";
 import { parseRecentArtworkIds, pushRecentArtworkId, shouldRefreshCachedArtwork } from "./lib/recent-artwork";
 import { planVinylHeartbeats } from "./lib/vinyl-heartbeats";
 import { isNearVinylBoundary, refinedVinylBoundaryAt, remainingTrackMs, shiftedBoundaryAfterPause, timecodeAtCaptureMs } from "./lib/vinyl-mode";
-import { vinylFolioCopy, type VinylProgress } from "./lib/vinyl-folio";
+import type { VinylProgress } from "./lib/vinyl-folio";
 import { encodeMonoWav, prepareRecognitionAudio } from "./lib/wav";
 
 type Act = "ready" | "track" | "handoff" | "art" | "art-fade" | "gallery" | "return";
@@ -82,6 +84,8 @@ export default function Home() {
   const [captureDebug, setCaptureDebug] = useState("");
   const [lastSampleUrl, setLastSampleUrl] = useState<string | null>(null);
   const [recognitionPhase, setRecognitionPhase] = useState<RecognitionPhase>("idle");
+  const [displayCode, setDisplayCode] = useState("");
+  const [displayPairStatus, setDisplayPairStatus] = useState("");
   const currentTrackRef = useRef(currentTrack);
   const actRef = useRef<Act>("ready");
   const listeningModeRef = useRef<ListeningMode>("live");
@@ -660,10 +664,19 @@ export default function Home() {
   async function startListenMode() {
     if (listeningRef.current) return;
     try {
+      if (!window.isSecureContext) {
+        setStatus("Microphone needs HTTPS or localhost. Use this computer as the controller (localhost:3000); keep the phone/TV on /display only.");
+        return;
+      }
+      if (!navigator.mediaDevices?.getUserMedia) {
+        setStatus("This browser cannot access the microphone.");
+        return;
+      }
       if (listeningModeRef.current === "vinyl") {
         resetVinylPrediction();
         lastTrackKeyRef.current = "";
       }
+      setStatus("Requesting microphone access…");
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: { deviceId: selectedDeviceId ? { exact: selectedDeviceId } : undefined, echoCancellation: false, noiseSuppression: false, autoGainControl: true, channelCount: 1, sampleRate: 48_000 },
       });
@@ -708,7 +721,16 @@ export default function Home() {
         : "Listen mode is on — compatibility capture enabled…");
       if (!worklet || !USE_AUDIO_CHANGE_DETECTOR) window.setTimeout(() => void requestRecognition("legacy-fallback"), 1_000);
       monitorSound();
-    } catch (error) { setStatus(error instanceof Error ? error.message : "Microphone access is unavailable."); }
+    } catch (error) {
+      const name = error instanceof DOMException ? error.name : "";
+      if (name === "NotAllowedError" || name === "PermissionDeniedError") {
+        setStatus("Microphone permission was denied. Allow mic access and try again.");
+      } else if (name === "NotFoundError" || name === "DevicesNotFoundError") {
+        setStatus("No microphone was found on this device.");
+      } else {
+        setStatus(error instanceof Error ? error.message : "Microphone access is unavailable.");
+      }
+    }
   }
 
   function stopListenMode() {
@@ -743,12 +765,88 @@ export default function Home() {
       : "Artwork curation is off — Vinyl Mode will show track and album information only.");
   }
 
+  async function ensureDisplaySession() {
+    setDisplayPairStatus("Creating a TV pairing code…");
+    try {
+      const response = await fetch("/api/display/session", { method: "POST" });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        setDisplayPairStatus(typeof payload.error === "string" ? payload.error : "Could not create a pairing code.");
+        return;
+      }
+      if (typeof payload.code !== "string") {
+        setDisplayPairStatus("Pairing response was incomplete.");
+        return;
+      }
+      setDisplayCode(payload.code);
+      setDisplayPairStatus("Open /display on the TV and enter this code.");
+    } catch (error) {
+      setDisplayPairStatus(error instanceof Error ? error.message : "Could not create a pairing code.");
+    }
+  }
+
+  function buildDisplaySnapshot(): DisplaySnapshot {
+    const live = hasLiveTrack || isPresentationAct(act);
+    return {
+      act,
+      listeningMode,
+      isListening,
+      status,
+      currentTrack: live ? {
+        artist: currentTrack.artist,
+        title: currentTrack.title,
+        album: currentTrack.album,
+        year: currentTrack.year,
+        ...(currentTrack.albumCover ? { albumCover: currentTrack.albumCover } : {}),
+        ...(currentTrack.genre ? { genre: currentTrack.genre } : {}),
+      } : null,
+      artwork: {
+        ...(art.id ? { id: art.id } : {}),
+        title: art.title,
+        artist: art.artist,
+        date: art.date,
+        museum: art.museum,
+        image: art.image,
+        rationale: art.rationale,
+      },
+      vinylProgress,
+      updatedAt: Date.now(),
+    };
+  }
+
+  useEffect(() => {
+    if (!displayCode) return;
+    const snapshot = buildDisplaySnapshot();
+    const timer = window.setTimeout(() => {
+      void fetch("/api/display/publish", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: displayCode, snapshot }),
+      }).then(async (response) => {
+        if (response.ok) return;
+        const payload = await response.json().catch(() => ({}));
+        if (typeof payload.error === "string") setDisplayPairStatus(payload.error);
+      }).catch(() => setDisplayPairStatus("Could not publish to the TV session."));
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [displayCode, act, listeningMode, isListening, status, currentTrack, art, vinylProgress]);
+
   const listenControl = <button className="listen-control" onClick={isListening ? stopListenMode : startListenMode}>{isListening ? "Pause listening" : listeningMode === "vinyl" ? "Start vinyl mode" : "Start live mode"}</button>;
   const microphonePicker = <label className="microphone-picker"><span>Microphone</span><select value={selectedDeviceId} onChange={(event) => setSelectedDeviceId(event.target.value)} disabled={isListening}><option value="">System default</option>{audioInputs.map((input) => <option key={input.deviceId} value={input.deviceId}>{input.label}</option>)}</select></label>;
   const modePicker = <div className="mode-picker" role="group" aria-label="Listening mode"><button type="button" className={listeningMode === "live" ? "is-active" : ""} onClick={() => chooseListeningMode("live")} disabled={isListening}><strong>Live</strong><span>Follow anything you play</span></button><button type="button" className={listeningMode === "vinyl" ? "is-active" : ""} onClick={() => chooseListeningMode("vinyl")} disabled={isListening}><strong>Vinyl</strong><span>Predict the album sequence</span></button></div>;
   const curationPicker = <div className="curation-picker" role="group" aria-label="Artwork curation"><button type="button" className={artCurationEnabled ? "is-active" : ""} onClick={() => chooseArtCuration(true)} disabled={isListening}>Art curation on</button><button type="button" className={!artCurationEnabled ? "is-active" : ""} onClick={() => chooseArtCuration(false)} disabled={isListening}>Music info only</button></div>;
-  const vinylFolio = listeningMode === "vinyl" && vinylProgress ? vinylFolioCopy(vinylProgress) : null;
-  const renderVinylFolio = (screen: "album" | "art") => vinylFolio ? <aside className={`vinyl-folio vinyl-folio--${screen}`} aria-label={`Vinyl playback: ${vinylFolio.sequence}`}><p className="vinyl-folio__label"><span />Vinyl</p>{screen === "art" && <p className="vinyl-folio__title">{currentTrack.title}</p>}<p className="vinyl-folio__sequence">{vinylFolio.sequence}</p></aside> : null;
+  const tvPairPanel = (
+    <aside className="tv-pair" aria-label="Television pairing">
+      <div className="tv-pair__copy">
+        <strong>{displayCode ? "TV pairing code" : "Show on TV"}</strong>
+        <span>{displayPairStatus || (displayCode ? "Open /display on the TV and enter this code." : "Create a short code the television can join.")}</span>
+      </div>
+      {displayCode ? <p className="tv-pair__code" aria-live="polite">{displayCode}</p> : null}
+      <button type="button" onClick={() => void ensureDisplaySession()}>
+        {displayCode ? "New code" : "Show on TV"}
+      </button>
+    </aside>
+  );
   const vinylSeconds = vinylBoundaryAtRef.current ? Math.round((vinylBoundaryAtRef.current - Date.now()) / 1000) : undefined;
   const nextVinylHeartbeatAt = [vinylMidpointHeartbeatAtRef.current, vinylPreTransitionHeartbeatAtRef.current].filter((at) => at > 0).sort((left, right) => left - right)[0];
   const vinylHeartbeatSeconds = nextVinylHeartbeatAt ? Math.max(0, Math.round((nextVinylHeartbeatAt - Date.now()) / 1000)) : undefined;
@@ -757,8 +855,40 @@ export default function Home() {
   const vinylSequenceIsActive = listeningMode === "vinyl" && Boolean(vinylAlbumRef.current);
   const transitionIndicator = !vinylSequenceIsActive && (recognitionPhase === "suspected" || recognitionPhase === "checking" || recognitionPhase === "matched") ? <aside className="transition-indicator" data-phase={recognitionPhase} aria-live="polite"><span className="signal-bars" aria-hidden="true"><i /><i /><i /><i /></span><span><small>{recognitionPhase === "suspected" ? "Listening closely" : recognitionPhase === "checking" ? "Checking the sound" : "Now playing"}</small><strong>{transitionLabel}</strong></span></aside> : null;
 
-  if (act === "ready") return <main className="ready"><p className="eyebrow">Needle & Frame</p><h1>{hasLiveTrack ? "Listen again" : "Listen and identify"}</h1><p>{hasLiveTrack ? `Last identified: ${currentTrack.title} — ${currentTrack.artist}` : listeningMode === "vinyl" ? "Identify the record once, then let the album unfold." : "Identify a song, then discover a matching artwork."}</p>{modePicker}{curationPicker}{microphonePicker}{listenControl}<small>{status}</small>{transitionIndicator}{debugPanel}</main>;
-  if (act === "track" || act === "handoff") return <main className={`track-screen${act === "handoff" ? " is-handing-off" : ""}`}>{act === "handoff" && <div className="handoff-art" aria-hidden="true"><img className="handoff-backdrop" src={art.image} alt="" /><img className="handoff-image" src={art.image} alt="" /></div>}<div className="frame" key={identityKey(currentTrack)}><section className="album-panel"><div className="album-mat"><div className={`album-cover${currentTrack.albumCover ? "" : " is-missing"}`} style={{ backgroundImage: currentTrack.albumCover ? `url(${currentTrack.albumCover})` : undefined }} role="img" aria-label={currentTrack.albumCover ? `${currentTrack.album} album artwork` : "Album artwork unavailable"}>{!currentTrack.albumCover && <span>{currentTrack.album.slice(0, 1)}</span>}</div></div></section><section className="now-playing"><p className="eyebrow now-label"><span />Now playing</p><h1 className={`artist-name${currentTrack.artist.length > 20 ? " is-long" : ""}`}>{currentTrack.artist}</h1><h2 className={`song-title${currentTrack.title.length > 26 ? " is-long" : ""}`}>{currentTrack.title}</h2><div className="album-details"><p className="field-label">From the album</p><p className="album-name"><em>{currentTrack.album}</em><span className="release-year"> · {currentTrack.year}</span></p></div></section>{renderVinylFolio("album")}{artCurationEnabled && <p className="curation-status" role="status"><span aria-hidden="true" />{status}</p>}</div>{transitionIndicator}{debugPanel}</main>;
-  if (act === "art" || act === "art-fade") return <main className={`art-intro${act === "art-fade" ? " is-info-fading" : ""}`} style={{ width: "min(100vw, calc(100vh * 16 / 9))", height: "min(100vh, calc(100vw * 9 / 16))", minHeight: 0, margin: "auto", aspectRatio: "16 / 9" }}><img className="art-image" style={{ position: "absolute", zIndex: 0, inset: "-3%", width: "106%", height: "106%", filter: "blur(26px) brightness(.38)", transform: "scale(1.06)" }} src={art.image} alt="" /><img className="art-image gallery-artwork" style={{ position: "absolute", zIndex: 1, inset: 0, objectFit: "cover" }} src={art.image} alt="" /><div className="art-overlay" style={{ zIndex: 2 }} /><section style={{ zIndex: 3 }}><p className="eyebrow">Selected artwork</p><h1 className={`art-title${art.title.length > 34 ? " is-long" : ""}`}><em>{art.title}</em></h1><h2>{art.artist}</h2><p>{art.date} · {art.museum}</p></section>{renderVinylFolio("art")}{transitionIndicator}{debugPanel}</main>;
-  return <main className={`gallery${act === "return" ? " is-returning" : ""}`} style={{ width: "min(100vw, calc(100vh * 16 / 9))", height: "min(100vh, calc(100vw * 9 / 16))", minHeight: 0, margin: "auto", aspectRatio: "16 / 9" }} onClick={() => setAct("ready")} aria-label={`${art.title} by ${art.artist}`}><img className="art-image" style={{ position: "absolute", zIndex: 0, inset: "-3%", width: "106%", height: "106%", filter: "blur(26px) brightness(.38)", transform: "scale(1.06)" }} src={art.image} alt="" /><img className="art-image gallery-artwork" style={{ position: "absolute", zIndex: 1, inset: 0, objectFit: "cover" }} src={art.image} alt={`${art.title} by ${art.artist}`} /><div className="gallery-overlay" aria-hidden="true" />{renderVinylFolio("art")}{transitionIndicator}{debugPanel}</main>;
+  if (act === "ready") return <main className="ready"><p className="eyebrow">Needle & Frame</p><h1>{hasLiveTrack ? "Listen again" : "Listen and identify"}</h1><p>{hasLiveTrack ? `Last identified: ${currentTrack.title} — ${currentTrack.artist}` : listeningMode === "vinyl" ? "Identify the record once, then let the album unfold." : "Identify a song, then discover a matching artwork."}</p>{modePicker}{curationPicker}{microphonePicker}{listenControl}{tvPairPanel}<small>{status}</small>{transitionIndicator}{debugPanel}</main>;
+  if (isPresentationAct(act)) {
+    return (
+      <PresentationStage
+        snapshot={{
+          act,
+          listeningMode,
+          isListening,
+          status,
+          currentTrack: hasLiveTrack ? {
+            artist: currentTrack.artist,
+            title: currentTrack.title,
+            album: currentTrack.album,
+            year: currentTrack.year,
+            ...(currentTrack.albumCover ? { albumCover: currentTrack.albumCover } : {}),
+            ...(currentTrack.genre ? { genre: currentTrack.genre } : {}),
+          } : null,
+          artwork: {
+            ...(art.id ? { id: art.id } : {}),
+            title: art.title,
+            artist: art.artist,
+            date: art.date,
+            museum: art.museum,
+            image: art.image,
+            rationale: art.rationale,
+          },
+          vinylProgress,
+          updatedAt: Date.now(),
+        }}
+        chrome={<>{transitionIndicator}{debugPanel}</>}
+        onGalleryClick={() => setAct("ready")}
+        showCurationStatus={artCurationEnabled}
+      />
+    );
+  }
+  return null;
 }

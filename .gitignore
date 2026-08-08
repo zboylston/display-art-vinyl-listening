@@ -13,3 +13,5 @@ dist/
 .pnpm-store/
 *.tsbuildinfo
 .DS_Store
+.vercel
+.env*
