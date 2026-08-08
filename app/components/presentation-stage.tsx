@@ -190,8 +190,8 @@ export function PresentationStage({
       <img className="art-image gallery-artwork" style={{ position: "absolute", zIndex: 1, inset: 0, objectFit: "cover" }} src={art.image} alt={`${art.title} by ${art.artist}`} />
       <div className="gallery-overlay" aria-hidden="true" />
       <header className="gallery-header">
-        <GalleryMusicHeader track={track} vinyl={vinyl} />
         <ArtCard art={art} />
+        <GalleryMusicHeader track={track} vinyl={vinyl} />
       </header>
       {chrome}
     </StageFrame>
