@@ -1,7 +1,9 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import type { ShazamRoot } from "shazam-api";
+import { Shazam } from "shazam-api";
 import { mapShazamRoot } from "./shazam";
+
+type ShazamRoot = NonNullable<Awaited<ReturnType<Shazam["fullRecognizeSong"]>>>;
 
 const fixture = JSON.parse(
   readFileSync(new URL("../../../evals/fixtures/shazam/i-will-survive.raw.json", import.meta.url), "utf8"),

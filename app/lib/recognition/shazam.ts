@@ -1,8 +1,11 @@
-import { Shazam, s16LEToSamplesArray, type ShazamRoot } from "shazam-api";
+import { Shazam, s16LEToSamplesArray } from "shazam-api";
 import type { ProviderMatch, ProviderOutcome } from "./types";
 import { decodeMonoPcm16Wav, floatToS16le, resampleLinear } from "./wav";
 
 const SHAZAM_SAMPLE_RATE = 16_000;
+
+/** Package keeps this type internal; derive it from the public recognize API. */
+type ShazamRoot = NonNullable<Awaited<ReturnType<Shazam["fullRecognizeSong"]>>>;
 
 function text(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
