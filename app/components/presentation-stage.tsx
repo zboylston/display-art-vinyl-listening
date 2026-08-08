@@ -16,17 +16,42 @@ function identityKey(track: DisplayTrack) {
   return `${track.artist}|${track.title}`.toLowerCase();
 }
 
-function VinylFolio({ track, progress, screen }: {
+function VinylFolio({ track, progress, screen, className }: {
   track: DisplayTrack;
   progress: NonNullable<DisplaySnapshot["vinylProgress"]>;
   screen: "album" | "art";
+  className?: string;
 }) {
   const folio = vinylFolioCopy(progress);
   return (
-    <aside className={`vinyl-folio vinyl-folio--${screen}`} aria-label={`Vinyl playback: ${folio.sequence}`}>
+    <aside className={`vinyl-folio vinyl-folio--${screen}${className ? ` ${className}` : ""}`} aria-label={`Vinyl playback: ${folio.sequence}`}>
       <p className="vinyl-folio__label"><span />Vinyl</p>
       {screen === "art" && <p className="vinyl-folio__title">{track.title}</p>}
       <p className="vinyl-folio__sequence">{folio.sequence}</p>
+    </aside>
+  );
+}
+
+function GalleryMusicHeader({ track, vinyl }: {
+  track: DisplayTrack;
+  vinyl: NonNullable<DisplaySnapshot["vinylProgress"]> | null;
+}) {
+  if (vinyl) return <VinylFolio track={track} progress={vinyl} screen="art" />;
+  return (
+    <aside className="gallery-music" aria-label="Now playing">
+      <p className="vinyl-folio__label"><span />Now playing</p>
+      <p className="vinyl-folio__title">{track.title}</p>
+      <p className="vinyl-folio__sequence">{track.artist}</p>
+    </aside>
+  );
+}
+
+function ArtCard({ art }: { art: DisplayArtwork }) {
+  return (
+    <aside className="art-card" aria-label="Artwork details">
+      <h2>{art.title}</h2>
+      <p className="art-card__artist">{art.artist}</p>
+      <p className="art-card__meta">{art.date} · {art.museum}</p>
     </aside>
   );
 }
@@ -164,7 +189,10 @@ export function PresentationStage({
       <img className="art-image" style={{ position: "absolute", zIndex: 0, inset: "-3%", width: "106%", height: "106%", filter: "blur(26px) brightness(.38)", transform: "scale(1.06)" }} src={art.image} alt="" />
       <img className="art-image gallery-artwork" style={{ position: "absolute", zIndex: 1, inset: 0, objectFit: "cover" }} src={art.image} alt={`${art.title} by ${art.artist}`} />
       <div className="gallery-overlay" aria-hidden="true" />
-      {vinyl && <VinylFolio track={track} progress={vinyl} screen="art" />}
+      <header className="gallery-header">
+        <GalleryMusicHeader track={track} vinyl={vinyl} />
+        <ArtCard art={art} />
+      </header>
       {chrome}
     </StageFrame>
   );
