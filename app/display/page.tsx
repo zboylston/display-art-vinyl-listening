@@ -1,19 +1,21 @@
 "use client";
 
-import { useEffect, useEffectEvent, useState, useTransition } from "react";
+import { useEffect, useEffectEvent, useState } from "react";
+import { PairingQr } from "../components/pairing-qr";
 import { PresentationStage } from "../components/presentation-stage";
 import {
   createEmptySnapshot,
   DISPLAY_CODE_STORAGE_KEY,
   isDisplayCode,
   normalizeDisplayCode,
+  pairControllerUrl,
   parseDisplaySnapshot,
   type DisplaySnapshot,
 } from "../lib/display-snapshot";
 
 const POLL_MS = 1500;
 
-function readInitialCode() {
+function readStoredCode() {
   if (typeof window === "undefined") return "";
   const fromQuery = new URLSearchParams(window.location.search).get("code");
   if (fromQuery && isDisplayCode(fromQuery)) return normalizeDisplayCode(fromQuery);
@@ -27,11 +29,12 @@ function readInitialCode() {
 
 export default function DisplayPage() {
   const [code, setCode] = useState("");
-  const [draft, setDraft] = useState("");
+  const [pairUrl, setPairUrl] = useState("");
   const [snapshot, setSnapshot] = useState<DisplaySnapshot | null>(null);
   const [error, setError] = useState("");
   const [connected, setConnected] = useState(false);
-  const [pending, startTransition] = useTransition();
+  const [controllerLinked, setControllerLinked] = useState(false);
+  const [bootstrapping, setBootstrapping] = useState(true);
 
   const refresh = useEffectEvent(async (sessionCode: string) => {
     try {
@@ -41,52 +44,79 @@ export default function DisplayPage() {
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) {
         setConnected(false);
+        setControllerLinked(false);
+        // Session expired — mint a fresh room so the QR stays usable.
+        if (response.status === 404) {
+          setError("Pairing expired — creating a new code…");
+          void createDisplayRoom();
+          return;
+        }
         setError(typeof payload.error === "string" ? payload.error : "Display session unavailable.");
         return;
       }
       const next = parseDisplaySnapshot(payload.snapshot);
-      if (!next) {
-        setConnected(true);
-        setSnapshot(createEmptySnapshot({ status: "Connected — waiting for the first presentation." }));
-        setError("");
-        return;
-      }
-      setSnapshot(next);
       setConnected(true);
       setError("");
+      if (!next) {
+        setControllerLinked(false);
+        setSnapshot(createEmptySnapshot({ status: "Waiting for your phone to link…" }));
+        return;
+      }
+      setControllerLinked(true);
+      setSnapshot(next);
     } catch {
       setConnected(false);
-      setError("Lost contact with the controller.");
+      setError("Lost contact with the pairing service.");
     }
   });
 
+  async function createDisplayRoom(preferred?: string) {
+    setBootstrapping(true);
+    setError("");
+    try {
+      const response = await fetch("/api/display/session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(preferred ? { code: preferred } : {}),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || typeof payload.code !== "string" || !isDisplayCode(payload.code)) {
+        setError(typeof payload.error === "string" ? payload.error : "Could not create a pairing code.");
+        setBootstrapping(false);
+        return;
+      }
+      const next = normalizeDisplayCode(payload.code);
+      setCode(next);
+      setSnapshot(null);
+      setControllerLinked(false);
+      setConnected(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not create a pairing code.");
+    } finally {
+      setBootstrapping(false);
+    }
+  }
+
   useEffect(() => {
-    const initial = readInitialCode();
-    if (!initial) return;
-    setCode(initial);
-    setDraft(initial);
+    const stored = readStoredCode();
+    if (stored) {
+      void createDisplayRoom(stored);
+      return;
+    }
+    void createDisplayRoom();
   }, []);
 
   useEffect(() => {
-    if (!code) return;
+    if (!code) {
+      setPairUrl("");
+      return;
+    }
     try { window.localStorage.setItem(DISPLAY_CODE_STORAGE_KEY, code); } catch { /* optional */ }
+    setPairUrl(pairControllerUrl(window.location.origin, code));
     void refresh(code);
     const timer = window.setInterval(() => void refresh(code), POLL_MS);
     return () => window.clearInterval(timer);
   }, [code]);
-
-  function joinSession(event: React.FormEvent) {
-    event.preventDefault();
-    const next = normalizeDisplayCode(draft);
-    if (!isDisplayCode(next)) {
-      setError("Enter the six-character code shown on the phone.");
-      return;
-    }
-    startTransition(() => {
-      setError("");
-      setCode(next);
-    });
-  }
 
   function clearPairing() {
     try { window.localStorage.removeItem(DISPLAY_CODE_STORAGE_KEY); } catch { /* optional */ }
@@ -96,36 +126,33 @@ export default function DisplayPage() {
       window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
     }
     setCode("");
-    setDraft("");
+    setPairUrl("");
     setSnapshot(null);
     setConnected(false);
-    setError("");
+    setControllerLinked(false);
+    void createDisplayRoom();
   }
 
-  if (!code) {
+  const waitingForPhone = !controllerLinked;
+
+  if (waitingForPhone) {
     return (
       <main className="display-pair">
         <p className="eyebrow">Needle & Frame</p>
-        <h1>Show on this screen</h1>
-        <p>On your phone, tap Show on TV, then scan the QR or type the six-character code here. Once linked, this TV remembers the pair.</p>
-        <form className="display-pair__form" onSubmit={joinSession}>
-          <label>
-            <span>Pairing code</span>
-            <input
-              value={draft}
-              onChange={(event) => setDraft(normalizeDisplayCode(event.target.value))}
-              autoCapitalize="characters"
-              autoCorrect="off"
-              spellCheck={false}
-              maxLength={6}
-              placeholder="AB12CD"
-              inputMode="text"
-              autoFocus
-            />
-          </label>
-          <button type="submit" disabled={pending || draft.length < 6}>Connect</button>
-        </form>
+        <h1>Link your phone</h1>
+        <p>Open the camera on your phone and scan this code. The phone becomes the listener; this screen shows the art.</p>
+        {bootstrapping && !code ? <p className="display-pair__hint">Preparing a pairing code…</p> : null}
+        {code && pairUrl ? (
+          <div className="display-pair__qr-block">
+            <PairingQr url={pairUrl} label={`Scan to link phone with code ${code}`} />
+            <p className="display-pair__code" aria-live="polite">{code}</p>
+            <p className="display-pair__hint">Or type this code on the phone under Show on TV.</p>
+          </div>
+        ) : null}
         {error && <p className="display-pair__error" role="alert">{error}</p>}
+        {connected && !controllerLinked ? (
+          <p className="display-pair__hint">Ready — waiting for the phone to scan…</p>
+        ) : null}
       </main>
     );
   }

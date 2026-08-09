@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { PairingQr } from "./components/pairing-qr";
 import { PresentationStage } from "./components/presentation-stage";
 import { AudioChangeDetector, rmsFromSamples, spectrumBandsFromDb, type DetectorState } from "./lib/audio-change-detector";
 import type { DisplaySnapshot } from "./lib/display-snapshot";
@@ -114,7 +113,7 @@ export default function Home() {
   const [recognitionPhase, setRecognitionPhase] = useState<RecognitionPhase>("idle");
   const [displayCode, setDisplayCode] = useState("");
   const [displayPairStatus, setDisplayPairStatus] = useState("");
-  const [displayJoinUrl, setDisplayJoinUrl] = useState("");
+  const [displayCodeDraft, setDisplayCodeDraft] = useState("");
   const currentTrackRef = useRef(currentTrack);
   const actRef = useRef<Act>("ready");
   const listeningModeRef = useRef<ListeningMode>("live");
@@ -171,16 +170,29 @@ export default function Home() {
   useEffect(() => { actRef.current = act; }, [act]);
   useEffect(() => { setShowAudioDebug(new URLSearchParams(window.location.search).get("debugAudio") === "1"); }, []);
   useEffect(() => {
-    // Resume the last TV pairing so you don't mint a new code every session.
+    // TV QR encodes /?pair=CODE — scanning opens the phone already linked.
+    // Fall back to the last remembered code when there is no scan param.
     try {
+      const params = new URLSearchParams(window.location.search);
+      const fromScan = params.get("pair") ?? params.get("code");
+      if (fromScan && isDisplayCode(fromScan)) {
+        const code = normalizeDisplayCode(fromScan);
+        void ensureDisplaySession(code);
+        if (window.history.replaceState) {
+          const url = new URL(window.location.href);
+          url.searchParams.delete("pair");
+          url.searchParams.delete("code");
+          window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+        }
+        return;
+      }
       const stored = window.localStorage.getItem(CONTROLLER_CODE_STORAGE_KEY);
       if (stored && isDisplayCode(stored)) void ensureDisplaySession(normalizeDisplayCode(stored));
     } catch { /* localStorage optional */ }
   }, []);
   useEffect(() => {
-    if (!displayCode) { setDisplayJoinUrl(""); return; }
+    if (!displayCode) return;
     try { window.localStorage.setItem(CONTROLLER_CODE_STORAGE_KEY, displayCode); } catch { /* optional */ }
-    setDisplayJoinUrl(`${window.location.origin}/display?code=${encodeURIComponent(displayCode)}`);
   }, [displayCode]);
   useEffect(() => {
     // Wake locks auto-release when the tab hides — re-acquire on return.
@@ -1139,41 +1151,46 @@ export default function Home() {
       : "Artwork curation is off — Vinyl Mode will show track and album information only.");
   }
 
-  async function ensureDisplaySession(preferredCode?: string, options?: { rotate?: boolean }) {
-    const rotating = Boolean(options?.rotate);
-    setDisplayPairStatus(preferredCode && !rotating ? "Reconnecting to your TV…" : "Creating a TV pairing code…");
+  async function ensureDisplaySession(preferredCode?: string) {
+    if (!preferredCode || !isDisplayCode(preferredCode)) {
+      setDisplayPairStatus("Scan the QR on the TV, or type the six-character code shown there.");
+      return;
+    }
+    const code = normalizeDisplayCode(preferredCode);
+    setDisplayPairStatus("Linking to your TV…");
     try {
       const response = await fetch("/api/display/session", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(preferredCode && !rotating ? { code: preferredCode } : {}),
+        body: JSON.stringify({ code }),
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) {
-        setDisplayPairStatus(typeof payload.error === "string" ? payload.error : "Could not create a pairing code.");
+        setDisplayPairStatus(typeof payload.error === "string" ? payload.error : "Could not link to the TV.");
         return;
       }
       if (typeof payload.code !== "string" || !isDisplayCode(payload.code)) {
         setDisplayPairStatus("Pairing response was incomplete.");
         return;
       }
-      const code = normalizeDisplayCode(payload.code);
-      setDisplayCode(code);
-      setDisplayPairStatus(
-        preferredCode && !rotating
-          ? "Linked — this phone stays paired until you forget."
-          : "Scan the QR to open the TV page, or type the code at /display. Stays linked after that.",
-      );
+      setDisplayCode(normalizeDisplayCode(payload.code));
+      setDisplayCodeDraft("");
+      setDisplayPairStatus("Linked — this phone stays paired until you forget.");
     } catch (error) {
-      setDisplayPairStatus(error instanceof Error ? error.message : "Could not create a pairing code.");
+      setDisplayPairStatus(error instanceof Error ? error.message : "Could not link to the TV.");
     }
+  }
+
+  function submitDisplayCode(event: React.FormEvent) {
+    event.preventDefault();
+    void ensureDisplaySession(displayCodeDraft);
   }
 
   function forgetDisplaySession() {
     try { window.localStorage.removeItem(CONTROLLER_CODE_STORAGE_KEY); } catch { /* optional */ }
     setDisplayCode("");
-    setDisplayJoinUrl("");
-    setDisplayPairStatus("TV unlinked. Tap Show on TV when you want to pair again.");
+    setDisplayCodeDraft("");
+    setDisplayPairStatus("TV unlinked. Scan the QR on the TV to pair again.");
   }
 
   function buildDisplaySnapshot(): DisplaySnapshot {
@@ -1230,24 +1247,33 @@ export default function Home() {
     <aside className="tv-pair" aria-label="Television pairing">
       <div className="tv-pair__copy">
         <strong>{displayCode ? "Linked to TV" : "Show on TV"}</strong>
-        <span>{displayPairStatus || (displayCode ? "This phone stays paired until you forget." : "Create a code once — scan the QR on the TV, then stay linked.")}</span>
+        <span>{displayPairStatus || (displayCode ? "This phone stays paired until you forget." : "Open /display on the TV, then scan its QR with this phone.")}</span>
       </div>
       {displayCode ? (
-        <div className="tv-pair__link">
-          {displayJoinUrl ? <PairingQr url={displayJoinUrl} label={`QR code opens ${displayJoinUrl}`} /> : null}
-          <p className="tv-pair__code" aria-live="polite">{displayCode}</p>
-        </div>
-      ) : null}
-      <div className="tv-pair__actions">
-        <button type="button" onClick={() => void ensureDisplaySession(undefined, { rotate: Boolean(displayCode) })}>
-          {displayCode ? "New code" : "Show on TV"}
-        </button>
-        {displayCode ? (
+        <p className="tv-pair__code" aria-live="polite">{displayCode}</p>
+      ) : (
+        <form className="tv-pair__form" onSubmit={submitDisplayCode}>
+          <input
+            value={displayCodeDraft}
+            onChange={(event) => setDisplayCodeDraft(normalizeDisplayCode(event.target.value))}
+            autoCapitalize="characters"
+            autoCorrect="off"
+            spellCheck={false}
+            maxLength={6}
+            placeholder="TV code"
+            inputMode="text"
+            aria-label="TV pairing code"
+          />
+          <button type="submit" disabled={displayCodeDraft.length < 6}>Link</button>
+        </form>
+      )}
+      {displayCode ? (
+        <div className="tv-pair__actions">
           <button type="button" className="tv-pair__ghost" onClick={forgetDisplaySession}>
             Forget TV
           </button>
-        ) : null}
-      </div>
+        </div>
+      ) : null}
     </aside>
   );
   const vinylSeconds = vinylBoundaryAtRef.current ? Math.round((vinylBoundaryAtRef.current - Date.now()) / 1000) : undefined;

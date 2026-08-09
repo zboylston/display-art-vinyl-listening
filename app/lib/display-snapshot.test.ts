@@ -24,6 +24,12 @@ describe("display codes", () => {
     const { DISPLAY_SESSION_TTL_SECONDS } = await import("./display-snapshot");
     expect(DISPLAY_SESSION_TTL_SECONDS).toBe(60 * 60 * 24 * 30);
   });
+
+  it("builds a phone controller URL for the TV QR", async () => {
+    const { pairControllerUrl } = await import("./display-snapshot");
+    expect(pairControllerUrl("https://example.com", "ab12cd")).toBe("https://example.com/?pair=AB12CD");
+    expect(pairControllerUrl("https://example.com/", "AB12CD")).toBe("https://example.com/?pair=AB12CD");
+  });
 });
 
 describe("sanitizeDisplayStatus", () => {

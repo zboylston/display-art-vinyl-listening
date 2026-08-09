@@ -40,6 +40,12 @@ export const DISPLAY_SESSION_TTL_SECONDS = 60 * 60 * 24 * 30;
 export const CONTROLLER_CODE_STORAGE_KEY = "needle-frame:controller-code";
 export const DISPLAY_CODE_STORAGE_KEY = "needle-frame:display-code";
 
+/** Phone controller URL encoded in the TV QR — scan opens the app already paired. */
+export function pairControllerUrl(origin: string, code: string) {
+  const normalized = normalizeDisplayCode(code);
+  return `${origin.replace(/\/$/, "")}/?pair=${encodeURIComponent(normalized)}`;
+}
+
 export function createEmptySnapshot(partial?: Partial<DisplaySnapshot>): DisplaySnapshot {
   return {
     act: "ready",
