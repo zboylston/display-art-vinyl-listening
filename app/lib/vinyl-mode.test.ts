@@ -21,6 +21,11 @@ describe("vinyl timing", () => {
     expect(timecodeAtCaptureMs(undefined, 15_000, 700)).toBeUndefined();
   });
 
+  it("advances Shazam offsets by the trailing fingerprint window, not the full upload", () => {
+    // 15s upload → 12s fingerprint; offset at fingerprint start → +12s to capture end.
+    expect(timecodeAtCaptureMs(85_000, 12_000, 700)).toBe(97_700);
+  });
+
   it("only treats changes close to the predicted ending as album progression", () => {
     expect(isNearVinylBoundary(100_000, 80_000)).toBe(true);
     expect(isNearVinylBoundary(100_000, 79_000)).toBe(false);
