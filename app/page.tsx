@@ -39,6 +39,7 @@ type SnapshotRequest = { resolve: (snapshot: RingSnapshot) => void; reject: (err
 type AudioDebug = { state: DetectorState; score: number; rms: number; reason: string };
 type RecognitionPhase = "idle" | "listening" | "suspected" | "checking" | "matched";
 type RecognitionOutcome = "match" | "same" | "none" | "error";
+type WakeLockSentinelLike = { release: () => Promise<void>; addEventListener?: (type: "release", listener: () => void) => void };
 
 const fixtureTrack: Track = { artist: "Nick Drake", title: "Pink Moon", album: "Pink Moon", year: "1972", albumCover: "https://i.scdn.co/image/ab67616d0000b273e369195caf5d169bf5e9eafc" };
 const initialArt: Artwork = { title: "Composition VIII", artist: "Wassily Kandinsky", date: "1923", museum: "Solomon R. Guggenheim Museum", image: "/kandinsky-composition-viii.jpg", rationale: "A study in suspended geometry and rhythmic space." };
@@ -99,6 +100,7 @@ export default function Home() {
   const [status, setStatus] = useState("Ready to listen.");
   const [isListening, setIsListening] = useState(false);
   const [showAudioDebug, setShowAudioDebug] = useState(false);
+  const [wakeLockState, setWakeLockState] = useState<"on" | "off" | "unsupported">("off");
   const [auddCalls, setAuddCalls] = useState(0);
   const [audioDebug, setAudioDebug] = useState<AudioDebug>({ state: "warming", score: 0, rms: 0, reason: "idle" });
   const [captureDebug, setCaptureDebug] = useState("");
@@ -118,7 +120,8 @@ export default function Home() {
   const frequencyDataRef = useRef<Float32Array<ArrayBuffer> | null>(null);
   const waveformDataRef = useRef<Float32Array<ArrayBuffer> | null>(null);
   const monitorIntervalRef = useRef<number | null>(null);
-  const wakeLockRef = useRef<{ release: () => Promise<void> } | null>(null);
+  const wakeLockRef = useRef<WakeLockSentinelLike | null>(null);
+  const wakeLockWantedRef = useRef(false);
   const listeningRef = useRef(false);
   const recordingRef = useRef(false);
   const lastTrackKeyRef = useRef("");
@@ -167,6 +170,16 @@ export default function Home() {
     };
     document.addEventListener("visibilitychange", onVisibility);
     return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, []);
+  useEffect(() => {
+    // Some browsers (iOS Safari) require a user gesture for every wake-lock
+    // request, so the visibilitychange re-acquire can fail. Any tap while
+    // listening retries it.
+    const onTap = () => {
+      if (listeningRef.current && !wakeLockRef.current) void acquireWakeLock();
+    };
+    document.addEventListener("pointerdown", onTap);
+    return () => document.removeEventListener("pointerdown", onTap);
   }, []);
   useEffect(() => {
     if (act === "art") { const timer = window.setTimeout(() => setAct("art-fade"), ART_INFO_HOLD_MS); return () => window.clearTimeout(timer); }
@@ -903,34 +916,55 @@ export default function Home() {
   /**
    * Screen Wake Lock keeps the controller phone awake while listening — the
    * whole detection pipeline dies if the screen locks or the tab suspends.
-   * Wake locks auto-release when the tab hides, so re-acquire on visibility
-   * return (see the visibilitychange effect below).
+   * Browsers require a fresh user gesture for each request, so this must be
+   * called synchronously from the Listen tap (before any await) — by the time
+   * the mic permission prompt is answered, the gesture has expired and the
+   * request is silently rejected. Wake locks also auto-release when the tab
+   * hides, so re-acquire on visibility return and on any later tap.
    */
   async function acquireWakeLock() {
-    const wakeLock = (navigator as Navigator & { wakeLock?: { request: (type: "screen") => Promise<{ release: () => Promise<void> }> } }).wakeLock;
-    if (!wakeLock || wakeLockRef.current) return;
+    const wakeLock = (navigator as Navigator & { wakeLock?: { request: (type: "screen") => Promise<WakeLockSentinelLike> } }).wakeLock;
+    if (!wakeLock) { setWakeLockState("unsupported"); return; }
+    if (wakeLockRef.current) return;
+    wakeLockWantedRef.current = true;
     try {
-      wakeLockRef.current = await wakeLock.request("screen");
+      const sentinel = await wakeLock.request("screen");
+      if (!wakeLockWantedRef.current) { void sentinel.release().catch(() => undefined); return; }
+      wakeLockRef.current = sentinel;
+      setWakeLockState("on");
+      sentinel.addEventListener?.("release", () => {
+        if (wakeLockRef.current === sentinel) wakeLockRef.current = null;
+        setWakeLockState("off");
+      });
     } catch {
       wakeLockRef.current = null;
-      setStatus("Listening — keep this screen awake so detection keeps running.");
+      setWakeLockState("off");
+      if (listeningRef.current) setStatus("Listening — keep this screen awake so detection keeps running.");
     }
   }
 
   function releaseWakeLock() {
+    wakeLockWantedRef.current = false;
     const sentinel = wakeLockRef.current;
     wakeLockRef.current = null;
+    setWakeLockState("off");
     void sentinel?.release().catch(() => undefined);
   }
 
   async function startListenMode() {
     if (listeningRef.current) return;
+    // Request the wake lock first, synchronously inside the tap gesture —
+    // after the awaits below (mic prompt, AudioContext) the gesture has
+    // expired and browsers silently reject the request.
+    void acquireWakeLock();
     try {
       if (!window.isSecureContext) {
+        releaseWakeLock();
         setStatus("Microphone needs HTTPS or localhost. Use this computer as the controller (localhost:3000); keep the phone/TV on /display only.");
         return;
       }
       if (!navigator.mediaDevices?.getUserMedia) {
+        releaseWakeLock();
         setStatus("This browser cannot access the microphone.");
         return;
       }
@@ -987,8 +1021,8 @@ export default function Home() {
       if (monitorIntervalRef.current) window.clearInterval(monitorIntervalRef.current);
       monitorIntervalRef.current = window.setInterval(monitorSound, FEATURE_INTERVAL_MS);
       monitorSound();
-      void acquireWakeLock();
     } catch (error) {
+      releaseWakeLock();
       const name = error instanceof DOMException ? error.name : "";
       if (name === "NotAllowedError" || name === "PermissionDeniedError") {
         setStatus("Microphone permission was denied. Allow mic access and try again.");
@@ -1128,7 +1162,7 @@ export default function Home() {
       : null,
     vinylLastAdvanceReasonRef.current !== "none" ? `adv:${vinylLastAdvanceReasonRef.current}` : null,
   ].filter(Boolean).join(" ") : "";
-  const debugPanel = showAudioDebug ? <aside className="audio-debug" aria-label="Audio detector diagnostics"><strong>{audioDebug.state}</strong><span>{listeningMode}</span>{activeMicrophone && <span>{activeMicrophone}</span>}<span>change {audioDebug.score.toFixed(3)}</span><span>rms {audioDebug.rms.toFixed(3)}</span><span>AudD calls {auddCalls}</span>{vinylSeconds !== undefined && <span>next {vinylSeconds}s</span>}{vinylHeartbeatSeconds !== undefined && <span>heartbeat {vinylHeartbeatSeconds}s</span>}{vinylDebugFlags && <span>{vinylDebugFlags}</span>}<span>{audioDebug.reason}</span>{captureDebug && <span>{captureDebug}</span>}{lastSampleUrl && <a href={lastSampleUrl} download="music-art-last-sample.wav" onClick={(event) => event.stopPropagation()}>download sample</a>}</aside> : null;
+  const debugPanel = showAudioDebug ? <aside className="audio-debug" aria-label="Audio detector diagnostics"><strong>{audioDebug.state}</strong><span>{listeningMode}</span>{activeMicrophone && <span>{activeMicrophone}</span>}<span>change {audioDebug.score.toFixed(3)}</span><span>rms {audioDebug.rms.toFixed(3)}</span><span>AudD calls {auddCalls}</span><span>wake {wakeLockState}</span>{vinylSeconds !== undefined && <span>next {vinylSeconds}s</span>}{vinylHeartbeatSeconds !== undefined && <span>heartbeat {vinylHeartbeatSeconds}s</span>}{vinylDebugFlags && <span>{vinylDebugFlags}</span>}<span>{audioDebug.reason}</span>{captureDebug && <span>{captureDebug}</span>}{lastSampleUrl && <a href={lastSampleUrl} download="music-art-last-sample.wav" onClick={(event) => event.stopPropagation()}>download sample</a>}</aside> : null;
   const transitionLabel = recognitionPhase === "suspected" ? "Possible new song" : recognitionPhase === "checking" ? "Identifying new song" : "New selection found";
   const vinylSequenceIsActive = listeningMode === "vinyl" && Boolean(vinylAlbumRef.current);
   const transitionIndicator = !vinylSequenceIsActive && (recognitionPhase === "suspected" || recognitionPhase === "checking" || recognitionPhase === "matched") ? <aside className="transition-indicator" data-phase={recognitionPhase} aria-live="polite"><span className="signal-bars" aria-hidden="true"><i /><i /><i /><i /></span><span><small>{recognitionPhase === "suspected" ? "Listening closely" : recognitionPhase === "checking" ? "Checking the sound" : "Now playing"}</small><strong>{transitionLabel}</strong></span></aside> : null;
