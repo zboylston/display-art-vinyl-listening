@@ -280,18 +280,32 @@ function smithsonianMedium(values: Array<{ label?: string; content?: string }> |
 async function searchSmithsonian(term: string): Promise<Candidate[]> {
   const apiKey = process.env.SMITHSONIAN_API_KEY;
   if (!apiKey) return [];
-  const url = new URL(smithsonianApi);
-  url.searchParams.set("api_key", apiKey);
-  // Restrict to online image media so library books/records don't fill the row budget.
-  url.searchParams.set("q", `${term} AND online_media_type:"Images"`);
-  url.searchParams.set("rows", String(EXTERNAL_RESULTS_PER_TERM));
-  const response = await fetch(url, { signal: AbortSignal.timeout(8000) });
-  if (!response.ok) return [];
-  const data = await response.json() as { response?: { rows?: SmithsonianRow[] } };
-  return (data.response?.rows ?? []).flatMap((row) => {
+  // Smithsonian catalogs photography by medium, not mood — bare terms return rights-restricted
+  // or image-less records. Query the raw term plus photography/portrait variants that surface
+  // the National Portrait Gallery and other open image collections, then merge + dedupe.
+  const queries = [
+    `${term} AND online_media_type:"Images"`,
+    `${term} photograph AND online_media_type:"Images"`,
+    `${term} portrait AND online_media_type:"Images"`,
+  ];
+  const rowSets = await Promise.all(queries.map(async (q) => {
+    const url = new URL(smithsonianApi);
+    url.searchParams.set("api_key", apiKey);
+    url.searchParams.set("q", q);
+    url.searchParams.set("rows", String(EXTERNAL_RESULTS_PER_TERM));
+    const response = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    if (!response.ok) return [];
+    const data = await response.json() as { response?: { rows?: SmithsonianRow[] } };
+    return data.response?.rows ?? [];
+  }));
+  const seen = new Set<string>();
+  return rowSets.flat().flatMap((row) => {
     const recordId = row.content?.descriptiveNonRepeating?.record_ID ?? row.id;
     const media = row.content?.descriptiveNonRepeating?.online_media?.media?.find((item) => item.type === "Images" && item.content);
     if (!recordId || !media?.content) return [];
+    const key = String(recordId);
+    if (seen.has(key)) return [];
+    seen.add(key);
     const title = (row.content?.descriptiveNonRepeating?.title?.content ?? row.title ?? "Untitled").replace(/<\/?I>/gi, "");
     // First name entry is the creator/photographer; later entries are often the subject.
     const artist = row.content?.freetext?.name?.[0]?.content ?? "Unknown artist";
