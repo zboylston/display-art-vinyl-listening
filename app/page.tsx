@@ -18,6 +18,8 @@ import {
   VINYL_VERIFY_SNAPSHOT_SECONDS,
   advanceVerificationAt,
   armVinylGapLatch,
+  boundaryIdentifyCaptureStartAt,
+  isVinylDetectorStateAudible,
   isVinylGapLatchExpired,
   rollbackAdvanceIndex,
   shouldAdvanceOnGapResume,
@@ -63,7 +65,7 @@ const INFO_TO_ART_DISSOLVE_MS = 6500;
 const ART_INFO_HOLD_MS = 9000;
 const ART_INFO_FADE_MS = 3500;
 const ART_TO_TRACK_DISSOLVE_MS = 4400;
-const CURATION_CACHE_VERSION = "v8-grounding-first";
+const CURATION_CACHE_VERSION = "v9-literal-lane";
 const RECENT_ARTWORK_STORAGE_KEY = `music-art:recent-artwork:${CURATION_CACHE_VERSION}`;
 const EARLY_TRANSITION_CONFIRM_DELAY_MS = 5_000;
 /** Brief dropouts should only shift the boundary; longer pauses may mean a skip. */
@@ -83,10 +85,6 @@ function timecodeToMs(timecode?: string): number | undefined {
 
 function isQuietTimingCheck(reason: RecognitionReason) {
   return reason === "heartbeat" || reason === "pre-transition" || reason === "end-confirm" || reason === "expected-ending";
-}
-
-function isAudibleDetectorState(state: DetectorState) {
-  return state === "stable" || state === "suspected" || state === "resuming";
 }
 
 function isPresentationAct(act: Act) {
@@ -173,6 +171,7 @@ export default function Home() {
   useEffect(() => {
     // TV QR encodes /?pair=CODE — scanning opens the phone already linked.
     // Fall back to the last remembered code when there is no scan param.
+    let stored: string | null = null;
     try {
       const params = new URLSearchParams(window.location.search);
       const fromScan = params.get("pair") ?? params.get("code");
@@ -187,9 +186,15 @@ export default function Home() {
         }
         return;
       }
-      const stored = window.localStorage.getItem(CONTROLLER_CODE_STORAGE_KEY);
-      if (stored && isDisplayCode(stored)) void ensureDisplaySession(normalizeDisplayCode(stored));
+      stored = window.localStorage.getItem(CONTROLLER_CODE_STORAGE_KEY);
     } catch { /* localStorage optional */ }
+    // Reconnect outside the try/catch so a storage read failure can never
+    // silently skip re-linking — and surface the attempt so an empty panel
+    // is never unexplained.
+    if (stored && isDisplayCode(stored)) {
+      setDisplayPairStatus("Reconnecting to your TV…");
+      void ensureDisplaySession(normalizeDisplayCode(stored));
+    }
   }, []);
   useEffect(() => {
     if (!displayCode) return;
@@ -948,7 +953,7 @@ export default function Home() {
         }
         if (vinylMode && vinylAlbumRef.current && vinylBoundaryAtRef.current > 0) {
           const pastBoundary = wallNow >= vinylBoundaryAtRef.current;
-          const audible = isAudibleDetectorState(update.state);
+          const audible = isVinylDetectorStateAudible(update.state);
           // Prediction-first: within the lead window before the predicted end and
           // music is playing, arm the gapless identify now so the capture straddles
           // the transition. The gap path stays as a fallback for real silence.
@@ -985,11 +990,11 @@ export default function Home() {
             && !vinylAdvancePendingVerifyRef.current
             && !vinylEndConfirmPendingRef.current
           ) {
-            // Arm gapless, but start the capture clock early by the lead amount so
-            // the fire lands ~4s past the boundary and the 5s snapshot window is
-            // mostly the next track (boundary-1s … boundary+4s), not the old tail.
+            // Arm early, but anchor the capture clock at the predicted boundary so
+            // it fires ~4s afterward. The 5s snapshot is therefore mostly the next
+            // track (boundary-1s … boundary+4s), not the old tail.
             vinylEndConfirmPendingRef.current = true;
-            vinylEndConfirmArmedAtRef.current = wallNow - VINYL_BOUNDARY_IDENTIFY_LEAD_MS;
+            vinylEndConfirmArmedAtRef.current = boundaryIdentifyCaptureStartAt(wallNow);
             vinylEndConfirmGaplessRef.current = true;
             setAudioDebug((debug) => ({ ...debug, reason: "end-capturing:lead" }));
           } else if (
