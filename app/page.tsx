@@ -173,6 +173,7 @@ export default function Home() {
   useEffect(() => {
     // TV QR encodes /?pair=CODE — scanning opens the phone already linked.
     // Fall back to the last remembered code when there is no scan param.
+    let stored: string | null = null;
     try {
       const params = new URLSearchParams(window.location.search);
       const fromScan = params.get("pair") ?? params.get("code");
@@ -187,9 +188,15 @@ export default function Home() {
         }
         return;
       }
-      const stored = window.localStorage.getItem(CONTROLLER_CODE_STORAGE_KEY);
-      if (stored && isDisplayCode(stored)) void ensureDisplaySession(normalizeDisplayCode(stored));
+      stored = window.localStorage.getItem(CONTROLLER_CODE_STORAGE_KEY);
     } catch { /* localStorage optional */ }
+    // Reconnect outside the try/catch so a storage read failure can never
+    // silently skip re-linking — and surface the attempt so an empty panel
+    // is never unexplained.
+    if (stored && isDisplayCode(stored)) {
+      setDisplayPairStatus("Reconnecting to your TV…");
+      void ensureDisplaySession(normalizeDisplayCode(stored));
+    }
   }, []);
   useEffect(() => {
     if (!displayCode) return;
