@@ -12,7 +12,10 @@ export async function GET(request: NextRequest) {
     const { url, headers } = imageRequest;
     // Large museum originals exceed Next's data-cache item limit. Let the browser/CDN
     // honor the response cache header instead of trying to store the body in Next.
-    const upstream = await fetch(url, { headers, cache: "no-store", redirect: "manual", signal: AbortSignal.timeout(12000) });
+    // Follow redirects: museum CDNs (Met, Cleveland, Art Institute, Smithsonian)
+    // commonly redirect to CDN edges, and the source URL is already validated
+    // against the provider allowlist in artworkImageRequest.
+    const upstream = await fetch(url, { headers, cache: "no-store", redirect: "follow", signal: AbortSignal.timeout(12000) });
     const contentType = upstream.headers.get("content-type") ?? "";
     if (!upstream.ok || !upstream.body || !contentType.startsWith("image/")) {
       console.error("[art-image] upstream failure", url.hostname, upstream.status, contentType);

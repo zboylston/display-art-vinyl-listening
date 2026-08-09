@@ -10,6 +10,7 @@ const providers: Record<string, { path: RegExp; headers?: Record<string, string>
     path: /^\/iiif\/2\/[^/]+\/full\/\d+,?\/0\/default\.(?:jpg|jpeg|png)$/i,
     headers: { "AIC-User-Agent": "music-art local listening display" },
   },
+  "ids.si.edu": { path: /^\/ids\/deliveryService$/ },
 };
 
 export function artworkImageRequest(source: string): ArtworkImageRequest | null {
