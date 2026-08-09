@@ -664,6 +664,18 @@ export default function Home() {
         }
         return "same";
       }
+      // Gap-verify guard: right after an optimistic advance, the verify clip can
+      // still hold the previous track's tail. If AudD locks onto that previous
+      // song, do NOT re-anchor backward — that is the advance-then-revert
+      // ping-pong. Treat it as a stale read and keep the advance.
+      const album = vinylAlbumRef.current;
+      if (vinylAdvancePendingVerifyRef.current && album) {
+        const previousIndex = album.index - 1;
+        const previous = previousIndex >= 0 ? album.tracks[previousIndex] : undefined;
+        if (previous && textTrackKey(previous) === textTrackKey(track)) {
+          return "same";
+        }
+      }
       const vinylAnchored = anchorVinylSequence(data.result as Record<string, unknown>, track, capturedAt, sampleDurationMs);
       if (!vinylAnchored) scheduleFallbackForTrack(track);
       lastTrackKeyRef.current = key;

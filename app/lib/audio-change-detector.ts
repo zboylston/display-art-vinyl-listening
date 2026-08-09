@@ -34,9 +34,12 @@ export const DEFAULT_DETECTOR_CONFIG: DetectorConfig = {
   changeThreshold: 0.12,
   sustainedMs: 2_750,
   // Digital and vinyl track gaps are often well under two seconds. A short
-  // gap arms recognition; the five-second resume requirement filters clicks.
+  // gap arms recognition; the resume requirement filters clicks. 2.5s of
+  // mostly-audible audio is enough to confirm a real resume — a needle drop or
+  // cough won't sustain the minimumAudibleRatio that long — and keeps the
+  // gap-advance from stalling at the predicted boundary.
   silenceMs: 650,
-  resumeMs: 5_000,
+  resumeMs: 2_500,
   // Initial discovery uses a full 15-second window. In our room tests AudD
   // fingerprinted the 15-second recording but rejected shorter excerpts.
   initialMusicMs: 15_000,
