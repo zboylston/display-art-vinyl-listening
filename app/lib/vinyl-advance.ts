@@ -25,6 +25,13 @@ export const VINYL_END_CONFIRM_GAPLESS_CAPTURE_MS = 4_000;
 export const VINYL_END_CONFIRM_CAPTURE_MS = 10_000;
 /** Snapshot length when identifying a gapless end-confirm (favor post-boundary audio). */
 export const VINYL_END_CONFIRM_GAPLESS_SNAPSHOT_SECONDS = 5;
+/**
+ * Prediction-first: arm the boundary identify this early, so the 5s capture
+ * window straddles the predicted transition (a little old-track tail, mostly
+ * new track) and the result lands right as the next song starts — instead of
+ * arming at the boundary and identifying ~7s late.
+ */
+export const VINYL_BOUNDARY_IDENTIFY_LEAD_MS = 3_000;
 /** How long to wait for sound after the end timer before parking. */
 export const VINYL_END_CONFIRM_TIMEOUT_MS = 15_000;
 
