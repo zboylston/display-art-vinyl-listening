@@ -96,6 +96,8 @@ export default function MicTestPage() {
         track.onunmute = () => logTrackEvent("track unmuted (audio flowing)");
         track.onended = () => logTrackEvent("track ENDED");
       }
+      logTrackEvent(`audioContext state=${context.state}`);
+      context.onstatechange = () => logTrackEvent(`audioContext state=${context.state}${context.state === "interrupted" ? " (OS interrupted the audio pipeline)" : ""}`);
       const devices = await navigator.mediaDevices.enumerateDevices().catch(() => []);
       const audioInputCount = devices.filter((device) => device.kind === "audioinput").length;
       setSettingsLines([
