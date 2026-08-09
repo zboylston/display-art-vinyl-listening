@@ -3,12 +3,18 @@ export const VINYL_GAP_LATCH_EXPIRE_MS = 15_000;
 /** Mid-track quiet long enough to treat the record as stopped, not paused. */
 export const VINYL_SUSTAINED_SILENCE_PARK_MS = 20_000;
 /**
- * After a gap advance, wait this long before the verify snapshot so the ring
- * holds ~10s of post-gap audio (resume already required ~5s audible).
+ * After a gap advance, wait this long before the verify snapshot so the new
+ * track is clearly underway. Too early and the ring still holds the old track's
+ * tail, so the verify clip is ambiguous and can false-match the previous song
+ * (the advance-then-revert ping-pong).
  */
-export const VINYL_ADVANCE_VERIFY_MS = 5_000;
-/** Snapshot length for post-advance verify and post-silence end-confirm. */
-export const VINYL_VERIFY_SNAPSHOT_SECONDS = 10;
+export const VINYL_ADVANCE_VERIFY_MS = 8_000;
+/**
+ * Snapshot length for post-advance verify and post-silence end-confirm. Keep it
+ * short — a brief clip taken once the new song is playing cannot match the old
+ * track, unlike a long window that spans the gap.
+ */
+export const VINYL_VERIFY_SNAPSHOT_SECONDS = 5;
 /**
  * Gapless (already audible at the boundary): wait this long past the predicted
  * end before identifying — long enough for a mostly-new-track ring window,
