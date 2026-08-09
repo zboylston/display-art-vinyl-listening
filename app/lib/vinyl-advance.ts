@@ -40,6 +40,19 @@ export function endConfirmCaptureMs(gapless: boolean) {
   return gapless ? VINYL_END_CONFIRM_GAPLESS_CAPTURE_MS : VINYL_END_CONFIRM_CAPTURE_MS;
 }
 
+/** Start the gapless capture clock at the predicted boundary, even when armed early. */
+export function boundaryIdentifyCaptureStartAt(now: number, leadMs = VINYL_BOUNDARY_IDENTIFY_LEAD_MS) {
+  return now + leadMs;
+}
+
+/**
+ * Cooldown and warming still represent audible playback; recognition resets the
+ * detector into those states. Only confirmed silence should block boundary capture.
+ */
+export function isVinylDetectorStateAudible(state: string) {
+  return state !== "silence";
+}
+
 export type VinylGapLatch = {
   armedAt: number;
 };

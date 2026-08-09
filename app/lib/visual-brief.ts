@@ -30,6 +30,8 @@ export type VisualBrief = {
   palette: string[];
   visual_motifs: string[];
   art_movements: string[];
+  /** Concrete title imagery searched and preserved as a separate candidate lane. */
+  literal_search_terms: string[];
   museum_search_terms: string[];
   curatorial_rationale: string;
   dossier: SongDossier;
@@ -136,10 +138,27 @@ export function sanitizeMuseumSearchTerms(terms: string[], track: CleanTrack, li
   return kept;
 }
 
+/** Keep concrete literal-title queries without the interpretive lane's title-echo cap. */
+export function sanitizeLiteralSearchTerms(terms: string[], track: CleanTrack, limit = 2) {
+  const kept: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of terms) {
+    const term = raw.trim().replace(/\s+/g, " ");
+    if (isBlockedSearchTerm(term, track)) continue;
+    const key = normalize(term);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    kept.push(term);
+    if (kept.length === limit) break;
+  }
+  return kept;
+}
+
 export function normalizeBrief(value: unknown, dossier: SongDossier, track: CleanTrack): VisualBrief {
   if (!value || typeof value !== "object") throw new Error("The visual-brief response was incomplete.");
   const brief = value as Record<string, unknown>;
   const terms = sanitizeMuseumSearchTerms(strings(brief.museum_search_terms, 16), track, 10);
+  const literalTerms = sanitizeLiteralSearchTerms(strings(brief.literal_search_terms, 8), track, 2);
   if (!terms.length) throw new Error("The visual brief did not provide usable museum search terms.");
   const energy = brief.energy === "low" || brief.energy === "medium" || brief.energy === "high" ? brief.energy : "medium";
   return {
@@ -156,6 +175,7 @@ export function normalizeBrief(value: unknown, dossier: SongDossier, track: Clea
     palette: strings(brief.palette, 5),
     visual_motifs: strings(brief.visual_motifs, 8),
     art_movements: strings(brief.art_movements, 3),
+    literal_search_terms: literalTerms,
     museum_search_terms: terms,
     curatorial_rationale: typeof brief.curatorial_rationale === "string" ? brief.curatorial_rationale.trim() : "",
     dossier,

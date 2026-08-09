@@ -8,8 +8,10 @@ import {
   VINYL_SUSTAINED_SILENCE_PARK_MS,
   advanceVerificationAt,
   armVinylGapLatch,
+  boundaryIdentifyCaptureStartAt,
   canPredictiveAdvance,
   endConfirmCaptureMs,
+  isVinylDetectorStateAudible,
   isVinylGapLatchExpired,
   rollbackAdvanceIndex,
   shouldAdvanceOnGapResume,
@@ -90,6 +92,36 @@ describe("predictive advance gates", () => {
 });
 
 describe("end-confirm arming", () => {
+  it("anchors an early-armed capture clock at the predicted boundary", () => {
+    const boundaryAt = 100_000;
+    const armedAt = boundaryIdentifyCaptureStartAt(
+      boundaryAt - 3_000,
+      3_000,
+    );
+    expect(armedAt).toBe(boundaryAt);
+    expect(shouldFireEndConfirm({
+      endConfirmPending: true,
+      endConfirmArmedAt: armedAt,
+      now: boundaryAt + VINYL_END_CONFIRM_GAPLESS_CAPTURE_MS - 1,
+      audible: true,
+      gapless: true,
+    })).toBe(false);
+    expect(shouldFireEndConfirm({
+      endConfirmPending: true,
+      endConfirmArmedAt: armedAt,
+      now: boundaryAt + VINYL_END_CONFIRM_GAPLESS_CAPTURE_MS,
+      audible: true,
+      gapless: true,
+    })).toBe(true);
+  });
+
+  it("keeps boundary capture audible through recognition cooldown and warming", () => {
+    expect(isVinylDetectorStateAudible("stable")).toBe(true);
+    expect(isVinylDetectorStateAudible("cooldown")).toBe(true);
+    expect(isVinylDetectorStateAudible("warming")).toBe(true);
+    expect(isVinylDetectorStateAudible("silence")).toBe(false);
+  });
+
   it("arms only past the boundary without gap/park/verify already active", () => {
     expect(shouldArmEndConfirm({
       pastBoundary: true,
