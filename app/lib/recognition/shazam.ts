@@ -1,6 +1,9 @@
 import { Shazam, s16LEToSamplesArray } from "shazam-api";
+import { SHAZAM_MAX_FINGERPRINT_MS, takeTrailingShazamFingerprint } from "./shazam-timing";
 import type { ProviderMatch, ProviderOutcome } from "./types";
 import { decodeMonoPcm16Wav, floatToS16le, resampleLinear } from "./wav";
+
+export { SHAZAM_MAX_FINGERPRINT_MS, shazamFingerprintDurationMs, takeTrailingShazamFingerprint } from "./shazam-timing";
 
 const SHAZAM_SAMPLE_RATE = 16_000;
 
@@ -54,7 +57,9 @@ export async function recognizeWithShazam(audio: ArrayBuffer): Promise<ProviderO
     if (resampled.length < SHAZAM_SAMPLE_RATE * 3) {
       return { kind: "miss", warning: "Could not hear the music clearly enough to identify." };
     }
-    const samples = s16LEToSamplesArray(floatToS16le(resampled));
+    // Take the trailing window before shazam-api can middle-slice a longer clip.
+    const fingerprint = takeTrailingShazamFingerprint(resampled, SHAZAM_SAMPLE_RATE, SHAZAM_MAX_FINGERPRINT_MS);
+    const samples = s16LEToSamplesArray(floatToS16le(fingerprint.samples));
     const shazam = new Shazam();
     const root = await shazam.fullRecognizeSong(samples);
     if (!root?.track?.title) {
@@ -63,7 +68,9 @@ export async function recognizeWithShazam(audio: ArrayBuffer): Promise<ProviderO
     }
     const match = mapShazamRoot(root);
     if (!match) return { kind: "miss" };
-    console.info(`[recognize] Shazam response matched=true title=${match.title} offsetMs=${match.timecodeMs ?? "none"}`);
+    console.info(
+      `[recognize] Shazam response matched=true title=${match.title} offsetMs=${match.timecodeMs ?? "none"} fingerprintMs=${fingerprint.fingerprintMs} discardedMs=${fingerprint.discardedMs}`,
+    );
     return { kind: "match", match };
   } catch (error) {
     const detail = error instanceof Error ? error.message : "Shazam recognition failed.";

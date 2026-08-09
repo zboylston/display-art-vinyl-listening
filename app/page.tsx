@@ -31,6 +31,8 @@ import {
   type VinylGapLatch,
 } from "./lib/vinyl-advance";
 import { planVinylHeartbeats } from "./lib/vinyl-heartbeats";
+import { shazamFingerprintDurationMs } from "./lib/recognition/shazam-timing";
+import { emptyVinylTimingCalibration, updateVinylTimingCalibration, type VinylTimingCalibration } from "./lib/vinyl-calibration";
 import { estimatedRemainingMs, isNearVinylBoundary, planVinylBoundaryAfterIdentify, refinedVinylBoundaryAt, remainingTrackMs, shiftedBoundaryAfterPause, shouldSkipArtworkForRemaining, timecodeAtCaptureMs } from "./lib/vinyl-mode";
 import type { VinylProgress } from "./lib/vinyl-folio";
 import { encodeMonoWav, prepareRecognitionAudio } from "./lib/wav";
@@ -70,6 +72,9 @@ const EARLY_TRANSITION_CONFIRM_DELAY_MS = 5_000;
 /** Brief dropouts should only shift the boundary; longer pauses may mean a skip. */
 const MIN_PAUSE_FOR_EARLY_CONFIRM_MS = 3_000;
 const MIN_PAUSE_DURING_PRESENTATION_MS = 6_000;
+/** Wait this long after the predicted end before sampling so the ring window is
+ * mostly the new track; otherwise the verify locks onto the old tail. */
+const POST_ADVANCE_VERIFY_BUFFER_MS = 3_000;
 
 function trackKey(track: Track) { return canonicalTrackKey(track); }
 
@@ -151,6 +156,8 @@ export default function Home() {
   const vinylParkedRef = useRef(false);
   const vinylAdvancePendingVerifyRef = useRef(false);
   const vinylAdvanceInFlightRef = useRef(false);
+  const vinylAdvanceStartedAtRef = useRef(0);
+  const vinylTimingCalibrationRef = useRef<VinylTimingCalibration>(emptyVinylTimingCalibration());
   const vinylEndConfirmPendingRef = useRef(false);
   const vinylEndConfirmArmedAtRef = useRef(0);
   const vinylEndConfirmInFlightRef = useRef(false);
@@ -412,6 +419,8 @@ export default function Home() {
     vinylParkedRef.current = false;
     vinylAdvancePendingVerifyRef.current = false;
     vinylAdvanceInFlightRef.current = false;
+    vinylAdvanceStartedAtRef.current = 0;
+    vinylTimingCalibrationRef.current = emptyVinylTimingCalibration();
     vinylLastAdvanceReasonRef.current = "none";
     clearVinylEndConfirm();
     vinylPreloadRef.current = null;
@@ -501,9 +510,9 @@ export default function Home() {
       albumCover: recognizedTrack.albumCover ?? tracks[matchedIndex].albumCover,
     };
     vinylAlbumRef.current = { tracks, index: matchedIndex };
-    // AudD reports a position in the captured fragment. Advance from that
-    // rolling window to the moment the snapshot ended, then account for the
-    // request in flight; otherwise every predicted handoff is a clip late.
+    // Provider offset is the song position at the start of the fingerprinted
+    // window. Advance to capture end, then account for the request in flight;
+    // otherwise every predicted handoff is a clip late.
     const elapsedSinceCapture = Math.min(25_000, Math.max(0, Date.now() - capturedAt));
     const anchoredTimecode = timecodeAtCaptureMs(recognizedTrack.timecodeMs, sampleDurationMs, elapsedSinceCapture);
     tracks[matchedIndex].timecodeMs = anchoredTimecode;
@@ -543,6 +552,20 @@ export default function Home() {
     const elapsedSinceCapture = Math.min(25_000, Math.max(0, Date.now() - capturedAt));
     const anchoredTimecode = timecodeAtCaptureMs(recognizedTrack.timecodeMs, sampleDurationMs, elapsedSinceCapture);
     if (anchoredTimecode === undefined) return;
+
+    // Calibration sample: the expected-ending verify after a predicted advance.
+    // The gap-verify guard already dropped previous-track matches, so this is a
+    // clean read on the new track. measuredAhead = how far past the advance
+    // Shazam says we are; if the previous boundary was on time, this is 0.
+    if (vinylAdvancePendingVerifyRef.current && vinylAdvanceStartedAtRef.current) {
+      const measuredAhead = anchoredTimecode - (capturedAt - vinylAdvanceStartedAtRef.current);
+      vinylTimingCalibrationRef.current = updateVinylTimingCalibration(
+        vinylTimingCalibrationRef.current,
+        measuredAhead,
+      );
+      setAudioDebug((debug) => ({ ...debug, reason: `calibrate:${Math.round(measuredAhead)}ms` }));
+    }
+
     const remaining = remainingTrackMs(recognizedTrack.durationMs ?? current.durationMs, anchoredTimecode);
     if (!remaining) return;
     const proposed = Date.now() + remaining;
@@ -589,7 +612,10 @@ export default function Home() {
     vinylAdvanceInFlightRef.current = true;
     album.index = nextIndex;
     next.timecodeMs = 0;
-    vinylBoundaryAtRef.current = next.durationMs ? Date.now() + next.durationMs : 0;
+    const advanceStartedAt = Date.now();
+    vinylAdvanceStartedAtRef.current = advanceStartedAt;
+    const calibratedDurationMs = next.durationMs ? Math.max(0, next.durationMs - vinylTimingCalibrationRef.current.offsetMs) : 0;
+    vinylBoundaryAtRef.current = calibratedDurationMs ? advanceStartedAt + calibratedDurationMs : 0;
     vinylPauseAtRef.current = 0;
     vinylGapPendingRef.current = false;
     vinylGapLatchRef.current = null;
@@ -607,7 +633,7 @@ export default function Home() {
     // a miss must never block or undo a prediction-driven transition.
     vinylAdvancePendingVerifyRef.current = true;
     vinylLastAdvanceReasonRef.current = reason;
-    nextFallbackAtRef.current = advanceVerificationAt(Date.now());
+    nextFallbackAtRef.current = advanceVerificationAt(Date.now() + POST_ADVANCE_VERIFY_BUFFER_MS);
     nextFallbackReasonRef.current = "expected-ending";
     setAudioDebug((debug) => ({ ...debug, reason: `advance:${reason}` }));
     try {
@@ -665,12 +691,17 @@ export default function Home() {
         discNumber: data.result.discNumber,
         genre: typeof data.result.genre === "string" ? data.result.genre : undefined,
       };
+      // Shazam fingerprints only the trailing ≤12s of the upload; advancing by
+      // the full clip length would place every boundary several seconds early.
+      const timingSampleMs = data.provider === "shazam"
+        ? shazamFingerprintDurationMs(sampleDurationMs)
+        : sampleDurationMs;
       const key = identityKey(track);
       if (key === lastTrackKeyRef.current) {
         // Same song: refine timing without a full re-anchor, and never overwrite
         // curation status on the track screen.
         if (vinylAlbumRef.current) {
-          refineVinylTiming(track, capturedAt, sampleDurationMs);
+          refineVinylTiming(track, capturedAt, timingSampleMs);
           preloadNextVinylArtwork();
         } else {
           if (shouldAnnounceRecognitionStatus(reason)) setStatus("Still listening…");
@@ -689,7 +720,7 @@ export default function Home() {
           return "same";
         }
       }
-      const vinylAnchored = anchorVinylSequence(data.result as Record<string, unknown>, track, capturedAt, sampleDurationMs);
+      const vinylAnchored = anchorVinylSequence(data.result as Record<string, unknown>, track, capturedAt, timingSampleMs);
       if (!vinylAnchored) scheduleFallbackForTrack(track);
       lastTrackKeyRef.current = key;
       const presentation = presentTrack(track);
@@ -1349,6 +1380,7 @@ export default function Home() {
   const vinylSeconds = vinylBoundaryAtRef.current ? Math.round((vinylBoundaryAtRef.current - Date.now()) / 1000) : undefined;
   const nextVinylHeartbeatAt = [vinylMidpointHeartbeatAtRef.current, vinylPreTransitionHeartbeatAtRef.current].filter((at) => at > 0).sort((left, right) => left - right)[0];
   const vinylHeartbeatSeconds = nextVinylHeartbeatAt ? Math.max(0, Math.round((nextVinylHeartbeatAt - Date.now()) / 1000)) : undefined;
+  const vinylCalibrationMs = vinylTimingCalibrationRef.current.offsetMs;
   const vinylDebugFlags = listeningMode === "vinyl" ? [
     vinylParkedRef.current ? "parked" : null,
     vinylGapPendingRef.current ? "gap" : null,
@@ -1357,6 +1389,7 @@ export default function Home() {
       ? (vinylEndConfirmArmedAtRef.current ? "end-capturing" : "end-waiting")
       : null,
     vinylLastAdvanceReasonRef.current !== "none" ? `adv:${vinylLastAdvanceReasonRef.current}` : null,
+    vinylCalibrationMs !== 0 ? `cal:${vinylCalibrationMs}ms` : null,
   ].filter(Boolean).join(" ") : "";
   const debugPanel = showAudioDebug ? <aside className="audio-debug" aria-label="Audio detector diagnostics"><strong>{audioDebug.state}</strong><span>{listeningMode}</span>{activeMicrophone && <span>{activeMicrophone}</span>}<span>change {audioDebug.score.toFixed(3)}</span><span>rms {audioDebug.rms.toFixed(3)}</span><span>AudD calls {auddCalls}</span><span>wake {wakeLockState}</span>{vinylSeconds !== undefined && <span>next {vinylSeconds}s</span>}{vinylHeartbeatSeconds !== undefined && <span>heartbeat {vinylHeartbeatSeconds}s</span>}{vinylDebugFlags && <span>{vinylDebugFlags}</span>}<span>{audioDebug.reason}</span>{captureDebug && <span>{captureDebug}</span>}{lastSampleUrl && <a href={lastSampleUrl} download="music-art-last-sample.wav" onClick={(event) => event.stopPropagation()}>download sample</a>}</aside> : null;
   const transitionLabel = recognitionPhase === "suspected" ? "Possible new song" : recognitionPhase === "checking" ? "Identifying new song" : "New selection found";

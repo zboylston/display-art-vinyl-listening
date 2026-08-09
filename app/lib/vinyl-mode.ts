@@ -85,10 +85,13 @@ export function refinedVinylBoundaryAt(currentBoundaryAt: number, proposedBounda
 }
 
 /**
- * AudD's timecode identifies the song position of the rolling fragment we
- * submit, rather than the wall-clock instant when its response arrives. Our
- * ring buffer ends at capture time, so advance the reported position by the
- * captured window before scheduling the next record boundary.
+ * Provider timecode identifies the song position at the start of the
+ * fingerprinted fragment, not the wall-clock instant when the response
+ * arrives. Advance by the fingerprint window (and any post-capture lag)
+ * before scheduling the next record boundary.
+ *
+ * For Shazam, pass only the trailing fingerprint duration (≤12s) — see
+ * `shazamFingerprintDurationMs` — not the full upload length.
  */
 export function timecodeAtCaptureMs(timecodeMs: number | undefined, sampleDurationMs = 0, elapsedSinceCaptureMs = 0) {
   if (timecodeMs === undefined) return undefined;
