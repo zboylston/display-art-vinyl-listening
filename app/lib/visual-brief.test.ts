@@ -87,15 +87,16 @@ describe("sanitizeMuseumSearchTerms", () => {
 });
 
 describe("normalizeBrief", () => {
+  const dossier = {
+    confidence: "medium" as const,
+    known_facts: [],
+    uncertain: [],
+    sonic_and_thematic_reading: "Dreamy, groove-led R&B.",
+    literal_traps_to_avoid: [],
+    artist_or_album_priors: [],
+  };
+
   it("keeps literal and interpretive retrieval lanes separate", () => {
-    const dossier = {
-      confidence: "medium" as const,
-      known_facts: [],
-      uncertain: [],
-      sonic_and_thematic_reading: "Dreamy, groove-led R&B.",
-      literal_traps_to_avoid: [],
-      artist_or_album_priors: [],
-    };
     const brief = normalizeBrief({
       semantic_anchors: ["wonder"],
       sonic_character: ["floating"],
@@ -116,6 +117,31 @@ describe("normalizeBrief", () => {
 
     expect(brief.literal_search_terms).toEqual(["starry night", "night sky"]);
     expect(brief.museum_search_terms).toEqual(["luminous blue", "night landscape"]);
+  });
+
+  it("keeps valence as its own axis and falls back to neutral", () => {
+    const base = {
+      semantic_anchors: [],
+      sonic_character: [],
+      emotional_tone: [],
+      formal_qualities: [],
+      cultural_context: [],
+      visual_direction: [],
+      avoid: [],
+      mood: [],
+      energy: "low",
+      palette: [],
+      visual_motifs: [],
+      art_movements: [],
+      literal_search_terms: [],
+      museum_search_terms: ["harvest field"],
+      curatorial_rationale: "",
+    };
+    const track = { artist: "James Taylor", title: "Sweet Baby James" };
+
+    expect(normalizeBrief({ ...base, valence: "tender" }, dossier, track).valence).toBe("tender");
+    expect(normalizeBrief({ ...base, valence: "wistful" }, dossier, track).valence).toBe("neutral");
+    expect(normalizeBrief(base, dossier, track).valence).toBe("neutral");
   });
 });
 

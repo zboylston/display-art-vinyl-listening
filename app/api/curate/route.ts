@@ -1,6 +1,13 @@
 import OpenAI from "openai";
 import { NextResponse } from "next/server";
 import { balanceBySource, MIN_LANDSCAPE_RATIO, orientationPoolForCurator } from "../../lib/art-orientation";
+import {
+  demoteToneMismatches,
+  describeArtTone,
+  measureArtTone,
+  toneMismatch,
+  type ArtTone,
+} from "../../lib/art-tone";
 import { excludeRecentCandidates, parseRecentArtworkIds } from "../../lib/recent-artwork";
 import {
   cleanTrackPayload,
@@ -11,6 +18,7 @@ import {
   strings,
   type CleanTrack,
   type SongDossier,
+  type Valence,
   type VisualBrief,
 } from "../../lib/visual-brief";
 
@@ -38,6 +46,7 @@ type Candidate = {
   objectName: string;
   probeImage: string;
   aspectRatio?: number;
+  tone?: ArtTone;
 };
 type CuratorCandidate = Candidate & { curatorImage: string };
 
@@ -52,6 +61,8 @@ const EXTERNAL_RESULTS_PER_TERM = 12;
 const MIN_SEARCH_TERMS = 8;
 const LITERAL_SEARCH_TERMS = 2;
 const LITERAL_CANDIDATES_TO_PRESERVE = 3;
+/** Keep at least one full semifinal batch even when most works clash with the brief's valence. */
+const MIN_TONE_ALIGNED_POOL = 6;
 const MIN_DISPLAY_RATIO = 0.55;
 const MAX_DISPLAY_RATIO = 2.8;
 const FINE_ART_TERMS = /\b(painting|print|drawing|photograph|photography|photographic|watercolor|watercolour|pastel|lithograph|etching|engraving|woodcut|monotype|collage|gelatin)\b/i;
@@ -93,11 +104,11 @@ async function createVisualPlan(client: OpenAI, track: CleanTrack, dossier: Song
     input: [
       {
         role: "developer",
-        content: "Create nuanced visual-art direction for a music-listening experience on a large television. Lead with positive grounding from the song dossier: energy, rhythm feel, timbre, and cultural setting. Map sound to visible qualities (e.g. pocket groove → dense overlapping forms and artificial night light; cool classic remade as funk → layered flat color planes and syncopated geometry). Anti-cliché is secondary and short. Never quote lyrics. Do not name specific artworks or museum artists. Return JSON only.",
+        content: "Create nuanced visual-art direction for a music-listening experience on a large television. Lead with positive grounding from the song dossier: energy, emotional temperature, rhythm feel, timbre, and cultural setting. Treat energy and emotional temperature as separate axes — a tender lullaby and a bleak dirge are both low energy but need opposite pictures, so palette and light must follow the warmth of the recording, not only its intensity. Map sound to visible qualities (e.g. pocket groove → dense overlapping forms and artificial night light; cool classic remade as funk → layered flat color planes and syncopated geometry). Anti-cliché is secondary and short. Never quote lyrics. Do not name specific artworks or museum artists. Return JSON only.",
       },
       {
         role: "user",
-        content: `Track identity: ${JSON.stringify(track)}\nSong dossier: ${JSON.stringify(dossier)}\n\n${lowConfidenceNote}\n\nReturn exactly these JSON keys:\n- semantic_anchors: 3-6 concepts grounded in the dossier's reading of THIS recording\n- sonic_character: 3-6 descriptors of space, rhythm, texture, or motion that match the stated energy\n- emotional_tone: 3-6 emotional qualities\n- formal_qualities: 3-6 visible compositional qualities that echo the music (density, syncopation, layering, openness, etc.)\n- cultural_context: up to 4 cautious associations\n- visual_direction: 3-6 requirements for room-scale television display\n- avoid: exactly 3-4 hard bans only — portraits, music notation/instruments as subject, weak decorative fillers. Do not expand the dossier's trap list. Do not ban literal title imagery; a night sky for "Stargazing" is welcome when it also fits the groove, and a lively dinner-party or gathering scene is welcome for a song about coming together.\n- mood: 3-6 adjectives\n- energy: low|medium|high — must match the dossier reading (groove-heavy, punchy, or danceable takes should be high or medium-high, never soft-default medium)\n- palette: 3-5 colors\n- visual_motifs: 4-8 concrete visible motifs museums can catalog, honest to energy (high energy: crowded night interiors, neon doorway, overlapping figures, bold geometric planes, urban signage color; low energy: open landscape, quiet interior, soft horizon)\n- art_movements: up to 3\n- literal_search_terms: exactly 2 concrete museum-catalog queries of 1-4 words that visualize the title directly while still fitting the recording. For Stargazing use terms such as "starry night" and "night sky"; for a communal song use "dinner party" and "banquet". This is a positive retrieval lane, not a trap list.\n- museum_search_terms: exactly 8 retrieval-native museum-catalog queries of 1-4 common words for sonic, emotional, formal, cultural, and setting interpretations distinct from literal_search_terms\n- curatorial_rationale: exactly 2 sentences grounded in the recording's feel\n\nFor museum_search_terms use 2 tight thematic subjects, 2 settings/atmospheres, 2 formal/light queries, and 2 broader wildcards. Prefer concrete nouns museums index. Match energy — for high-energy urban/funk/soul-jazz prefer terms like night cafe, dance hall, neon interior, crowded street, geometric collage, bold color planes; for sparse music prefer open landscape terms. Procession, parade, courtyard, and similar communal public scenes remain valid when they fit the reading. Do not use artist names, instruments, or music/audio words.`,
+        content: `Track identity: ${JSON.stringify(track)}\nSong dossier: ${JSON.stringify(dossier)}\n\n${lowConfidenceNote}\n\nReturn exactly these JSON keys:\n- semantic_anchors: 3-6 concepts grounded in the dossier's reading of THIS recording\n- sonic_character: 3-6 descriptors of space, rhythm, texture, or motion that match the stated energy\n- emotional_tone: 3-6 emotional qualities\n- formal_qualities: 3-6 visible compositional qualities that echo the music (density, syncopation, layering, openness, etc.)\n- cultural_context: up to 4 cautious associations\n- visual_direction: 3-6 requirements for room-scale television display\n- avoid: exactly 3-4 hard bans only — portraits, music notation/instruments as subject, weak decorative fillers. Do not expand the dossier's trap list. Do not ban literal title imagery; a night sky for "Stargazing" is welcome when it also fits the groove, and a lively dinner-party or gathering scene is welcome for a song about coming together.\n- mood: 3-6 adjectives\n- energy: low|medium|high — must match the dossier reading (groove-heavy, punchy, or danceable takes should be high or medium-high, never soft-default medium)\n- valence: tender|warm|neutral|melancholy|ominous — emotional temperature, judged independently of energy. A gentle consoling lullaby is tender even though it is low energy; a bleak or menacing piece is ominous even when it is quiet. Only use neutral when the recording genuinely has no emotional lean.\n- palette: 3-5 colors that carry the stated valence — a tender or warm reading needs warm or luminous color, never funereal grey\n- visual_motifs: 4-8 concrete visible motifs museums can catalog, honest to both energy and valence (high energy: crowded night interiors, neon doorway, overlapping figures, bold geometric planes, urban signage color; low energy and tender: sunlit open landscape, warm lamplit interior, soft horizon, harvest field; low energy and ominous: bare winter field, shuttered room, storm light)\n- art_movements: up to 3\n- literal_search_terms: exactly 2 concrete museum-catalog queries of 1-4 words that visualize the title directly while still fitting the recording. For Stargazing use terms such as "starry night" and "night sky"; for a communal song use "dinner party" and "banquet". This is a positive retrieval lane, not a trap list.\n- museum_search_terms: exactly 8 retrieval-native museum-catalog queries of 1-4 common words for sonic, emotional, formal, cultural, and setting interpretations distinct from literal_search_terms\n- curatorial_rationale: exactly 2 sentences grounded in the recording's feel\n\nFor museum_search_terms use 2 tight thematic subjects, 2 settings/atmospheres, 2 formal/light queries, and 2 broader wildcards. Prefer concrete nouns museums index. Match both energy and valence — for high-energy urban/funk/soul-jazz prefer terms like night cafe, dance hall, neon interior, crowded street, geometric collage, bold color planes; for sparse tender music prefer warm open terms like summer meadow, morning light, harvest field, lamplit interior, and steer away from bleak, wintry, or funereal subjects; reserve those for genuinely melancholy or ominous readings. Procession, parade, courtyard, and similar communal public scenes remain valid when they fit the reading. Do not use artist names, instruments, or music/audio words.`,
       },
     ],
   });
@@ -513,7 +524,12 @@ async function withCuratorImage(candidate: Candidate): Promise<CuratorCandidate 
     if (!response.ok || !contentType.startsWith("image/")) return null;
     const bytes = Buffer.from(await response.arrayBuffer());
     if (bytes.length < 256 || bytes.length > 2_000_000) return null;
-    return { ...candidate, curatorImage: `data:${contentType};base64,${bytes.toString("base64")}` };
+    const tone = await measureArtTone(bytes);
+    return {
+      ...candidate,
+      ...(tone ? { tone } : {}),
+      curatorImage: `data:${contentType};base64,${bytes.toString("base64")}`,
+    };
   } catch {
     return null;
   }
@@ -523,12 +539,16 @@ function candidateContent(
   candidate: CuratorCandidate,
   detail: "low" | "high",
   literalCandidateIds: ReadonlySet<string>,
+  valence: Valence,
 ) {
   const intent = literalCandidateIds.has(candidate.id)
     ? " Retrieval lane: literal title imagery; judge whether the visible work also fits the music."
     : "";
+  const tone = candidate.tone ? ` Measured tone: ${describeArtTone(candidate.tone)}.` : "";
+  const mismatch = toneMismatch(valence, candidate.tone);
+  const conflict = mismatch ? ` Tone conflict: ${mismatch.reason}.` : "";
   return [
-    { type: "input_text" as const, text: `Candidate ${candidate.id}: ${candidate.title} — ${candidate.artist}, ${candidate.date}. Medium: ${candidate.medium || "unknown"}. Object type: ${candidate.objectName || "unknown"}. Aspect ratio: ${candidate.aspectRatio?.toFixed(2) ?? "unknown"}.${intent}` },
+    { type: "input_text" as const, text: `Candidate ${candidate.id}: ${candidate.title} — ${candidate.artist}, ${candidate.date}. Medium: ${candidate.medium || "unknown"}. Object type: ${candidate.objectName || "unknown"}. Aspect ratio: ${candidate.aspectRatio?.toFixed(2) ?? "unknown"}.${tone}${conflict}${intent}` },
     { type: "input_image" as const, image_url: candidate.curatorImage, detail },
   ];
 }
@@ -551,12 +571,12 @@ async function chooseSemifinalists(
     model,
     reasoning,
     input: [
-      { role: "developer", content: "You are a museum curator conducting a comparative semifinal for a widescreen television display. Prefer works that match the brief's positive energy, sonic character, and motifs. Reject merely decorative or off-energy matches. Return JSON only. Never invent facts." },
+      { role: "developer", content: "You are a museum curator conducting a comparative semifinal for a widescreen television display. Prefer works that match the brief's energy, emotional temperature, sonic character, and motifs. Judge visual strength relative to the brief rather than in the absolute: for a tender low-energy brief a quiet, warm, luminous work is strong, and a dramatic or funereal one is off-brief no matter how striking it looks as a thumbnail. Reject off-energy and off-valence matches. Return JSON only. Never invent facts." },
       {
         role: "user",
         content: [
-          { type: "input_text", text: `Track: ${JSON.stringify(track)}\nSong dossier confidence: ${brief.confidence}\nDossier reading: ${brief.dossier.sonic_and_thematic_reading}\nVisual brief: ${JSON.stringify({ semantic_anchors: brief.semantic_anchors, sonic_character: brief.sonic_character, emotional_tone: brief.emotional_tone, visual_motifs: brief.visual_motifs, literal_search_terms: brief.literal_search_terms, mood: brief.mood, energy: brief.energy, avoid: brief.avoid })}\n\nChoose the strongest ${SEMIFINALISTS_PER_BATCH} distinct candidates that fit this recording's energy and reading. A successful pairing needs at least one semantic_anchors connection, one emotional or sonic connection, and one compelling visual reason. Fitting literal title imagery is a positive semantic connection, not merely permissible: reward it when the actual image also carries the mood, energy, and visual strength. Do not prefer abstraction simply because it seems more original. Prefer strong room-scale compositions when they also fit the brief. Return exactly {"candidateIds":["source:id","source:id"]}, ranked best first.` },
-          ...candidates.flatMap((candidate) => candidateContent(candidate, "low", literalCandidateIds)),
+          { type: "input_text", text: `Track: ${JSON.stringify(track)}\nSong dossier confidence: ${brief.confidence}\nDossier reading: ${brief.dossier.sonic_and_thematic_reading}\nVisual brief: ${JSON.stringify({ semantic_anchors: brief.semantic_anchors, sonic_character: brief.sonic_character, emotional_tone: brief.emotional_tone, visual_motifs: brief.visual_motifs, literal_search_terms: brief.literal_search_terms, mood: brief.mood, energy: brief.energy, valence: brief.valence, palette: brief.palette, avoid: brief.avoid })}\n\nChoose the strongest ${SEMIFINALISTS_PER_BATCH} distinct candidates that fit this recording's energy, valence, and reading. A successful pairing needs at least one semantic_anchors connection, one emotional or sonic connection, and one compelling visual reason. Each candidate lists a measured tone (brightness, colour, temperature); treat it as fact and weigh it against the brief's valence and palette. Reject any candidate carrying a stated tone conflict unless every alternative in this batch is worse. Subject matter alone is not enough: a work can name the right subject and still invert the recording's emotional temperature. Fitting literal title imagery is a positive semantic connection, not merely permissible: reward it when the actual image also carries the mood, energy, valence, and visual strength. Do not prefer abstraction simply because it seems more original. Return exactly {"candidateIds":["source:id","source:id"]}, ranked best first.` },
+          ...candidates.flatMap((candidate) => candidateContent(candidate, "low", literalCandidateIds, brief.valence)),
         ],
       },
     ],
@@ -582,12 +602,12 @@ async function chooseCandidate(
     model,
     reasoning,
     input: [
-      { role: "developer", content: "You are the final critic for a museum-quality music and art pairing on a widescreen television. Compare the finalists directly, apply the stated rubric and penalties, and choose the exceptional pairing rather than the first defensible one. Weight fidelity to this recording's stated energy and sonic character above generic elegance. Candidates are verified two-dimensional fine art. Do not invent works, artists, lyrics, history, or other facts. Return JSON only." },
+      { role: "developer", content: "You are the final critic for a museum-quality music and art pairing on a widescreen television. Compare the finalists directly, apply the stated rubric and penalties, and choose the exceptional pairing rather than the first defensible one. Weight fidelity to this recording's stated energy, emotional temperature, and sonic character above generic elegance. Energy and valence are independent: a tender lullaby and a bleak dirge are both low energy, so matching energy proves nothing about whether the picture feels right. Candidates are verified two-dimensional fine art. Do not invent works, artists, lyrics, history, or other facts. Return JSON only." },
       {
         role: "user",
         content: [
-          { type: "input_text", text: `Track: ${JSON.stringify(track)}\nSong dossier: ${JSON.stringify(brief.dossier)}\nVisual brief: ${JSON.stringify(brief)}\nLiteral-lane candidate IDs: ${JSON.stringify([...literalCandidateIds])}\n\nScore comparatively using: thematic resonance including fitting title imagery 30%, sonic and emotional resonance (including energy match) 30%, visual strength on television 15%, recording-specific cultural or setting fidelity 10%, interpretive originality 5%, historical connection 5%, and provenance confidence 5%. Apply explicit penalties: energy mismatch (e.g. serene/historical decoration for a groove-heavy or high-energy reading) -30; gorgeous but off-brief -30; generic or decorative -20; shallow title illustration that ignores the recording's energy or setting -20; artist or musician portrait -25; weak television composition -15; rationale requiring invented facts -30. Award a +15 title-resonance bonus when a literal image visibly expresses the title and also matches the recording's mood or energy. Do not choose an abstract or indirect interpretation merely because it appears more sophisticated. A successful winner must name which semantic_anchors, title imagery, or motifs it supports, plus an emotional or sonic connection and a visual reason.\n\nReturn exactly {"candidateId":"source:id","alternativeIds":["source:id","source:id"],"matchedAnchors":["anchor","anchor"],"rationale":"two concise sentences explaining visible and interpretive connections without invented facts"}.` },
-          ...candidates.flatMap((candidate) => candidateContent(candidate, "high", literalCandidateIds)),
+          { type: "input_text", text: `Track: ${JSON.stringify(track)}\nSong dossier: ${JSON.stringify(brief.dossier)}\nVisual brief: ${JSON.stringify(brief)}\nLiteral-lane candidate IDs: ${JSON.stringify([...literalCandidateIds])}\nBrief valence: ${brief.valence}\n\nEach candidate states a measured tone (brightness, colour, temperature) computed from the image itself, and a tone conflict where one was detected. Treat both as fact and weigh them against the brief's valence and palette.\n\nScore comparatively using: thematic resonance including fitting title imagery 30%, sonic and emotional resonance including energy and valence match 30%, visual strength on television judged relative to the brief's energy and valence 15%, recording-specific cultural or setting fidelity 10%, interpretive originality 5%, historical connection 5%, and provenance confidence 5%. Apply explicit penalties: energy mismatch (e.g. serene/historical decoration for a groove-heavy or high-energy reading) -30; valence mismatch (e.g. a bleak, funereal, wintry, or menacing image for a tender or warm reading, or a sunny cheerful one for an ominous reading) -30; right subject but inverted emotional temperature -30; gorgeous but off-brief -30; generic or decorative -20; shallow title illustration that ignores the recording's energy, valence, or setting -20; artist or musician portrait -25; weak television composition -15; rationale requiring invented facts -30. Award a +15 title-resonance bonus only when a literal image visibly expresses the title and also matches the recording's mood, energy, and valence; a literal subject match with the wrong emotional temperature earns the valence penalty instead of the bonus. Judge visual strength relative to the brief: for a tender low-energy reading a quiet, warm, luminous work is strong, not decorative, and a dramatic high-contrast one is off-brief however striking it looks. Do not choose an abstract or indirect interpretation merely because it appears more sophisticated. A successful winner must name which semantic_anchors, title imagery, or motifs it supports, plus an emotional or sonic connection, how it fits the stated valence, and a visual reason.\n\nReturn exactly {"candidateId":"source:id","alternativeIds":["source:id","source:id"],"matchedAnchors":["anchor","anchor"],"rationale":"two concise sentences explaining visible and interpretive connections without invented facts"}.` },
+          ...candidates.flatMap((candidate) => candidateContent(candidate, "high", literalCandidateIds, brief.valence)),
         ],
       },
     ],
@@ -618,6 +638,8 @@ export async function POST(request: Request) {
       track: `${track.artist} — ${track.title}`,
       confidence: brief.confidence,
       genre: track.genre ?? null,
+      energy: brief.energy,
+      valence: brief.valence,
       exclude: excludeArtworkIds.length,
       literalTerms: brief.literal_search_terms,
       interpretiveTerms: brief.museum_search_terms,
@@ -669,9 +691,12 @@ export async function POST(request: Request) {
     );
     const curatorReady = (await Promise.all(selectionPool.map(withCuratorImage)))
       .filter((candidate): candidate is CuratorCandidate => candidate !== null);
-    const literalCuratorReady = curatorReady.filter((candidate) => literalCandidateIds.has(candidate.id));
+    // Filter before the literal lane is re-preserved, so title imagery cannot
+    // carry a bleak picture into the final on subject match alone.
+    const toneAligned = demoteToneMismatches(curatorReady, brief.valence, MIN_TONE_ALIGNED_POOL);
+    const literalCuratorReady = toneAligned.filter((candidate) => literalCandidateIds.has(candidate.id));
     const curatorPool = preservePriorityCandidates(
-      balanceBySource(curatorReady, MAX_VISUAL_CANDIDATES),
+      balanceBySource(toneAligned, MAX_VISUAL_CANDIDATES),
       literalCuratorReady,
       MAX_VISUAL_CANDIDATES,
     );
@@ -690,6 +715,10 @@ export async function POST(request: Request) {
       afterExclude: sourceCounts(withoutRecent),
       selectionPool: sourceCounts(selectionPool),
       curatorReady: sourceCounts(curatorReady),
+      valence: brief.valence,
+      toneDemoted: curatorReady
+        .filter((candidate) => toneMismatch(brief.valence, candidate.tone)?.severity === "hard")
+        .map((candidate) => `${candidate.id} (${candidate.title})`),
       visualPool: sourceCounts(curatorPool),
       literalDisplayable: literalDisplayable.map((candidate) => candidate.id),
       literalVisual: literalCuratorReady.map((candidate) => candidate.id),
@@ -729,6 +758,8 @@ export async function POST(request: Request) {
     console.info("[curate] selection", JSON.stringify({
       selected: selected.id,
       literal: finalistLiteralIds.has(selected.id),
+      tone: selected.tone ? describeArtTone(selected.tone) : null,
+      toneConflict: toneMismatch(brief.valence, selected.tone)?.reason ?? null,
       alternatives: alternatives.map((candidate) => candidate.id),
       rationale,
     }));

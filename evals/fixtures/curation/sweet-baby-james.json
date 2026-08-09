@@ -1,0 +1,58 @@
+{
+  "reported": "2026-08-09",
+  "complaint": "A moody black-and-white photograph of shepherds was chosen for a gentle James Taylor lullaby. It suited heavy music, not this.",
+  "diagnosis": "The pairing matched on subject (a cowboy lullaby retrieved herding imagery) and on energy (both low), which were the only axes scored. Nothing measured emotional temperature, so a bleak picture satisfied every check.",
+  "track": {
+    "artist": "James Taylor",
+    "title": "Sweet Baby James",
+    "album": "Sweet Baby James",
+    "year": "1970",
+    "genre": "Singer/Songwriter"
+  },
+  "expected": {
+    "energy": "low",
+    "valence": "tender"
+  },
+  "rejected": [
+    {
+      "id": "cleveland:169149",
+      "title": "Two Shepherdesses Resting with Two Sheep",
+      "artist": "Auguste Giraudon's Artist (French)",
+      "date": "late 1870s",
+      "museum": "Cleveland Museum of Art",
+      "medium": "albumen print from wet collodion negative",
+      "objectName": "Photograph",
+      "aspectRatio": 1.52,
+      "tone": { "luminance": 0.25, "saturation": 0.078, "warmth": 0.078 },
+      "why": "Dark and effectively colourless. Passed the fine-art, landscape, and energy filters, and its herding subject read as a literal title match."
+    }
+  ],
+  "tolerated": [
+    {
+      "id": "artic:81515",
+      "title": "The Little Shepherdess",
+      "artist": "Jean François Millet",
+      "date": "1868–72",
+      "museum": "Art Institute of Chicago",
+      "medium": "Oil on panel",
+      "objectName": "Painting",
+      "aspectRatio": 0.7,
+      "tone": { "luminance": 0.231, "saturation": 0.146, "warmth": 0.142 },
+      "why": "Same pastoral subject and nearly as dark, but it holds warm colour. Pins the threshold: dim-and-coloured is a soft clash, dim-and-grey is a hard one."
+    }
+  ],
+  "preferred": [
+    {
+      "id": "artic:111746",
+      "title": "The Harvesters",
+      "artist": "Léon Augustin Lhermitte",
+      "date": "1888–89",
+      "museum": "Art Institute of Chicago",
+      "medium": "Oil on canvas",
+      "objectName": "Painting",
+      "aspectRatio": 1.48,
+      "tone": { "luminance": 0.508, "saturation": 0.237, "warmth": 0.233 },
+      "why": "The same rural world, but sunlit and warm, and already widescreen for the television."
+    }
+  ]
+}

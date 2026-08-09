@@ -66,7 +66,7 @@ const INFO_TO_ART_DISSOLVE_MS = 6500;
 const ART_INFO_HOLD_MS = 9000;
 const ART_INFO_FADE_MS = 3500;
 const ART_TO_TRACK_DISSOLVE_MS = 4400;
-const CURATION_CACHE_VERSION = "v9-literal-lane";
+const CURATION_CACHE_VERSION = "v10-valence";
 const RECENT_ARTWORK_STORAGE_KEY = `music-art:recent-artwork:${CURATION_CACHE_VERSION}`;
 const EARLY_TRANSITION_CONFIRM_DELAY_MS = 5_000;
 /** Brief dropouts should only shift the boundary; longer pauses may mean a skip. */
