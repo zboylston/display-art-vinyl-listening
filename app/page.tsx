@@ -13,6 +13,7 @@ import {
 import { canonicalTrackKey, INITIAL_DISCOVERY_CAPTURE_MS, noMatchRetryDelay, RecognitionGate, textTrackKey } from "./lib/recognition";
 import { parseRecentArtworkIds, pushRecentArtworkId, shouldRefreshCachedArtwork } from "./lib/recent-artwork";
 import {
+  VINYL_BOUNDARY_IDENTIFY_LEAD_MS,
   VINYL_END_CONFIRM_GAPLESS_SNAPSHOT_SECONDS,
   VINYL_VERIFY_SNAPSHOT_SECONDS,
   advanceVerificationAt,
@@ -664,6 +665,18 @@ export default function Home() {
         }
         return "same";
       }
+      // Gap-verify guard: right after an optimistic advance, the verify clip can
+      // still hold the previous track's tail. If AudD locks onto that previous
+      // song, do NOT re-anchor backward — that is the advance-then-revert
+      // ping-pong. Treat it as a stale read and keep the advance.
+      const album = vinylAlbumRef.current;
+      if (vinylAdvancePendingVerifyRef.current && album) {
+        const previousIndex = album.index - 1;
+        const previous = previousIndex >= 0 ? album.tracks[previousIndex] : undefined;
+        if (previous && textTrackKey(previous) === textTrackKey(track)) {
+          return "same";
+        }
+      }
       const vinylAnchored = anchorVinylSequence(data.result as Record<string, unknown>, track, capturedAt, sampleDurationMs);
       if (!vinylAnchored) scheduleFallbackForTrack(track);
       lastTrackKeyRef.current = key;
@@ -936,6 +949,11 @@ export default function Home() {
         if (vinylMode && vinylAlbumRef.current && vinylBoundaryAtRef.current > 0) {
           const pastBoundary = wallNow >= vinylBoundaryAtRef.current;
           const audible = isAudibleDetectorState(update.state);
+          // Prediction-first: within the lead window before the predicted end and
+          // music is playing, arm the gapless identify now so the capture straddles
+          // the transition. The gap path stays as a fallback for real silence.
+          const withinIdentifyLead = audible && !vinylGapPendingRef.current
+            && wallNow >= vinylBoundaryAtRef.current - VINYL_BOUNDARY_IDENTIFY_LEAD_MS;
 
           if (
             shouldTimeoutEndConfirm({
@@ -961,6 +979,19 @@ export default function Home() {
             vinylEndConfirmInFlightRef.current = true;
             setAudioDebug((debug) => ({ ...debug, reason: "end-confirm" }));
             void requestRecognition("end-confirm");
+          } else if (
+            withinIdentifyLead
+            && !vinylParkedRef.current
+            && !vinylAdvancePendingVerifyRef.current
+            && !vinylEndConfirmPendingRef.current
+          ) {
+            // Arm gapless, but start the capture clock early by the lead amount so
+            // the fire lands ~4s past the boundary and the 5s snapshot window is
+            // mostly the next track (boundary-1s … boundary+4s), not the old tail.
+            vinylEndConfirmPendingRef.current = true;
+            vinylEndConfirmArmedAtRef.current = wallNow - VINYL_BOUNDARY_IDENTIFY_LEAD_MS;
+            vinylEndConfirmGaplessRef.current = true;
+            setAudioDebug((debug) => ({ ...debug, reason: "end-capturing:lead" }));
           } else if (
             shouldArmEndConfirm({
               pastBoundary,
