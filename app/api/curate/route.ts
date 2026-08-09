@@ -51,7 +51,7 @@ const EXTERNAL_RESULTS_PER_TERM = 12;
 const MIN_SEARCH_TERMS = 8;
 const MIN_DISPLAY_RATIO = 0.55;
 const MAX_DISPLAY_RATIO = 2.8;
-const FINE_ART_TERMS = /\b(painting|print|drawing|photograph|photography|watercolor|watercolour|pastel|lithograph|etching|engraving|woodcut|monotype|collage)\b/i;
+const FINE_ART_TERMS = /\b(painting|print|drawing|photograph|photography|photographic|watercolor|watercolour|pastel|lithograph|etching|engraving|woodcut|monotype|collage|gelatin)\b/i;
 const OBJECT_TERMS = /\b(armor|armour|bowl|vessel|cup|cabinet|chair|table|mirror|sword|helmet|screen|tureen|plate|jar|beaker|sculpture|relief|mask|textile|garment|coin|instrument|lamp|furniture|weapon|box)\b/i;
 
 function jsonFromModel(text: string): unknown {
@@ -272,13 +272,18 @@ function smithsonianText(values: Array<{ label?: string; content?: string }> | u
   return values?.map((value) => value.content).filter(Boolean).join("; ") ?? "";
 }
 
+function smithsonianMedium(values: Array<{ label?: string; content?: string }> | undefined) {
+  return values?.filter((value) => value.label === "Medium").map((value) => value.content).filter(Boolean).join("; ") ?? "";
+}
+
 /** Smithsonian Open Access — strong photography/documentary archive. Requires SMITHSONIAN_API_KEY. */
 async function searchSmithsonian(term: string): Promise<Candidate[]> {
   const apiKey = process.env.SMITHSONIAN_API_KEY;
   if (!apiKey) return [];
   const url = new URL(smithsonianApi);
   url.searchParams.set("api_key", apiKey);
-  url.searchParams.set("q", term);
+  // Restrict to online image media so library books/records don't fill the row budget.
+  url.searchParams.set("q", `${term} AND online_media_type:"Images"`);
   url.searchParams.set("rows", String(EXTERNAL_RESULTS_PER_TERM));
   const response = await fetch(url, { signal: AbortSignal.timeout(8000) });
   if (!response.ok) return [];
@@ -287,11 +292,13 @@ async function searchSmithsonian(term: string): Promise<Candidate[]> {
     const recordId = row.content?.descriptiveNonRepeating?.record_ID ?? row.id;
     const media = row.content?.descriptiveNonRepeating?.online_media?.media?.find((item) => item.type === "Images" && item.content);
     if (!recordId || !media?.content) return [];
-    const title = row.content?.descriptiveNonRepeating?.title?.content ?? row.title ?? "Untitled";
-    const artist = smithsonianText(row.content?.freetext?.name) || "Unknown artist";
+    const title = (row.content?.descriptiveNonRepeating?.title?.content ?? row.title ?? "Untitled").replace(/<\/?I>/gi, "");
+    // First name entry is the creator/photographer; later entries are often the subject.
+    const artist = row.content?.freetext?.name?.[0]?.content ?? "Unknown artist";
     const date = smithsonianText(row.content?.freetext?.date) || "Date unknown";
-    const medium = smithsonianText(row.content?.freetext?.physicalDescription);
-    const objectName = smithsonianText(row.content?.freetext?.type);
+    // Medium ("Gelatin silver print") carries the fine-art keyword; type is usually empty.
+    const medium = smithsonianMedium(row.content?.freetext?.physicalDescription);
+    const objectName = medium || smithsonianText(row.content?.freetext?.type) || "photograph";
     const museum = row.content?.descriptiveNonRepeating?.data_source ?? "Smithsonian";
     const width = Number(media.width);
     const height = Number(media.height);
