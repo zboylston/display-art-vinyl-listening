@@ -4,13 +4,13 @@ import { useEffect, useEffectEvent, useState, useTransition } from "react";
 import { PresentationStage } from "../components/presentation-stage";
 import {
   createEmptySnapshot,
+  DISPLAY_CODE_STORAGE_KEY,
   isDisplayCode,
   normalizeDisplayCode,
   parseDisplaySnapshot,
   type DisplaySnapshot,
 } from "../lib/display-snapshot";
 
-const STORAGE_KEY = "needle-frame:display-code";
 const POLL_MS = 1500;
 
 function readInitialCode() {
@@ -18,7 +18,7 @@ function readInitialCode() {
   const fromQuery = new URLSearchParams(window.location.search).get("code");
   if (fromQuery && isDisplayCode(fromQuery)) return normalizeDisplayCode(fromQuery);
   try {
-    const stored = window.localStorage.getItem(STORAGE_KEY);
+    const stored = window.localStorage.getItem(DISPLAY_CODE_STORAGE_KEY);
     return stored && isDisplayCode(stored) ? normalizeDisplayCode(stored) : "";
   } catch {
     return "";
@@ -69,7 +69,7 @@ export default function DisplayPage() {
 
   useEffect(() => {
     if (!code) return;
-    try { window.localStorage.setItem(STORAGE_KEY, code); } catch { /* optional */ }
+    try { window.localStorage.setItem(DISPLAY_CODE_STORAGE_KEY, code); } catch { /* optional */ }
     void refresh(code);
     const timer = window.setInterval(() => void refresh(code), POLL_MS);
     return () => window.clearInterval(timer);
@@ -89,7 +89,7 @@ export default function DisplayPage() {
   }
 
   function clearPairing() {
-    try { window.localStorage.removeItem(STORAGE_KEY); } catch { /* optional */ }
+    try { window.localStorage.removeItem(DISPLAY_CODE_STORAGE_KEY); } catch { /* optional */ }
     if (typeof window !== "undefined" && window.history.replaceState) {
       const url = new URL(window.location.href);
       url.searchParams.delete("code");
@@ -107,7 +107,7 @@ export default function DisplayPage() {
       <main className="display-pair">
         <p className="eyebrow">Needle & Frame</p>
         <h1>Show on this screen</h1>
-        <p>Open the app on your phone, tap Show on TV, then enter the code here.</p>
+        <p>On your phone, tap Show on TV, then scan the QR or type the six-character code here. Once linked, this TV remembers the pair.</p>
         <form className="display-pair__form" onSubmit={joinSession}>
           <label>
             <span>Pairing code</span>
@@ -145,7 +145,7 @@ export default function DisplayPage() {
         <span>TV</span>
         <strong aria-label={`Paired with code ${code}`}>{code}</strong>
         <button type="button" onClick={clearPairing}>
-          Change code
+          Unlink
         </button>
       </div>
     </div>

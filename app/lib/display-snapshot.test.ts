@@ -19,6 +19,11 @@ describe("display codes", () => {
     expect(code).toHaveLength(6);
     expect(isDisplayCode(code)).toBe(true);
   });
+
+  it("keeps remembered pairs warm for a month of inactivity", async () => {
+    const { DISPLAY_SESSION_TTL_SECONDS } = await import("./display-snapshot");
+    expect(DISPLAY_SESSION_TTL_SECONDS).toBe(60 * 60 * 24 * 30);
+  });
 });
 
 describe("sanitizeDisplayStatus", () => {

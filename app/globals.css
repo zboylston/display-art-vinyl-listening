@@ -114,9 +114,14 @@
 .display-waiting p{margin:0;max-width:28rem;color:#c9bcad;font:400 1rem/1.5 Inter,sans-serif}
 .display-waiting .eyebrow{color:#e2ab7c;margin:0}
 .tv-pair{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:.7rem 1rem;width:min(34rem,90vw);margin:1rem 0 0;padding:.85rem 1rem;border:1px solid rgba(255,248,238,.16);border-radius:.95rem;background:rgba(255,248,238,.04);color:#d9d0c1;text-align:left}
-.tv-pair__copy{display:grid;gap:.2rem;min-width:0;flex:1}
+.tv-pair__copy{display:grid;gap:.2rem;min-width:0;flex:1 1 12rem}
 .tv-pair__copy strong{color:#fff7e9;font:500 .92rem/1.2 Inter,sans-serif;letter-spacing:.04em}
 .tv-pair__copy span{color:#b7a998;font:400 .72rem/1.35 Inter,sans-serif}
-.tv-pair__code{font:500 clamp(1.4rem,3vw,2rem)/1 "Cormorant Garamond",Georgia,serif;letter-spacing:.22em;color:#e2ab7c}
+.tv-pair__link{display:grid;justify-items:center;gap:.55rem}
+.tv-pair__qr{width:7.5rem;height:7.5rem;padding:.35rem;border-radius:.7rem;background:#fff8ee;overflow:hidden}
+.tv-pair__qr svg{display:block;width:100%;height:100%}
+.tv-pair__code{margin:0;font:500 clamp(1.4rem,3vw,2rem)/1 "Cormorant Garamond",Georgia,serif;letter-spacing:.22em;color:#e2ab7c}
+.tv-pair__actions{display:flex;flex-wrap:wrap;gap:.55rem}
 .tv-pair button{margin:0;padding:.65rem 1rem;font-size:.78rem}
+.tv-pair__ghost{border-color:rgba(255,248,238,.22)!important;background:transparent!important;color:#d9d0c1!important}
 .ready .tv-pair{margin-top:1.1rem}

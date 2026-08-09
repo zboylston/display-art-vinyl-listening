@@ -1,10 +1,16 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { PairingQr } from "./components/pairing-qr";
 import { PresentationStage } from "./components/presentation-stage";
 import { AudioChangeDetector, rmsFromSamples, spectrumBandsFromDb, type DetectorState } from "./lib/audio-change-detector";
 import type { DisplaySnapshot } from "./lib/display-snapshot";
-import { sanitizeDisplayStatus } from "./lib/display-snapshot";
+import {
+  CONTROLLER_CODE_STORAGE_KEY,
+  isDisplayCode,
+  normalizeDisplayCode,
+  sanitizeDisplayStatus,
+} from "./lib/display-snapshot";
 import { canonicalTrackKey, INITIAL_DISCOVERY_CAPTURE_MS, noMatchRetryDelay, RecognitionGate, textTrackKey } from "./lib/recognition";
 import { parseRecentArtworkIds, pushRecentArtworkId, shouldRefreshCachedArtwork } from "./lib/recent-artwork";
 import {
@@ -24,7 +30,7 @@ import {
   type VinylGapLatch,
 } from "./lib/vinyl-advance";
 import { planVinylHeartbeats } from "./lib/vinyl-heartbeats";
-import { isNearVinylBoundary, refinedVinylBoundaryAt, remainingTrackMs, shiftedBoundaryAfterPause, timecodeAtCaptureMs } from "./lib/vinyl-mode";
+import { estimatedRemainingMs, isNearVinylBoundary, planVinylBoundaryAfterIdentify, refinedVinylBoundaryAt, remainingTrackMs, shiftedBoundaryAfterPause, shouldSkipArtworkForRemaining, timecodeAtCaptureMs } from "./lib/vinyl-mode";
 import type { VinylProgress } from "./lib/vinyl-folio";
 import { encodeMonoWav, prepareRecognitionAudio } from "./lib/wav";
 
@@ -39,6 +45,7 @@ type SnapshotRequest = { resolve: (snapshot: RingSnapshot) => void; reject: (err
 type AudioDebug = { state: DetectorState; score: number; rms: number; reason: string };
 type RecognitionPhase = "idle" | "listening" | "suspected" | "checking" | "matched";
 type RecognitionOutcome = "match" | "same" | "none" | "error";
+type WakeLockSentinelLike = { release: () => Promise<void>; addEventListener?: (type: "release", listener: () => void) => void };
 
 const fixtureTrack: Track = { artist: "Nick Drake", title: "Pink Moon", album: "Pink Moon", year: "1972", albumCover: "https://i.scdn.co/image/ab67616d0000b273e369195caf5d169bf5e9eafc" };
 const initialArt: Artwork = { title: "Composition VIII", artist: "Wassily Kandinsky", date: "1923", museum: "Solomon R. Guggenheim Museum", image: "/kandinsky-composition-viii.jpg", rationale: "A study in suspended geometry and rhythmic space." };
@@ -99,6 +106,7 @@ export default function Home() {
   const [status, setStatus] = useState("Ready to listen.");
   const [isListening, setIsListening] = useState(false);
   const [showAudioDebug, setShowAudioDebug] = useState(false);
+  const [wakeLockState, setWakeLockState] = useState<"on" | "off" | "unsupported">("off");
   const [auddCalls, setAuddCalls] = useState(0);
   const [audioDebug, setAudioDebug] = useState<AudioDebug>({ state: "warming", score: 0, rms: 0, reason: "idle" });
   const [captureDebug, setCaptureDebug] = useState("");
@@ -106,6 +114,7 @@ export default function Home() {
   const [recognitionPhase, setRecognitionPhase] = useState<RecognitionPhase>("idle");
   const [displayCode, setDisplayCode] = useState("");
   const [displayPairStatus, setDisplayPairStatus] = useState("");
+  const [displayJoinUrl, setDisplayJoinUrl] = useState("");
   const currentTrackRef = useRef(currentTrack);
   const actRef = useRef<Act>("ready");
   const listeningModeRef = useRef<ListeningMode>("live");
@@ -118,7 +127,8 @@ export default function Home() {
   const frequencyDataRef = useRef<Float32Array<ArrayBuffer> | null>(null);
   const waveformDataRef = useRef<Float32Array<ArrayBuffer> | null>(null);
   const monitorIntervalRef = useRef<number | null>(null);
-  const wakeLockRef = useRef<{ release: () => Promise<void> } | null>(null);
+  const wakeLockRef = useRef<WakeLockSentinelLike | null>(null);
+  const wakeLockWantedRef = useRef(false);
   const listeningRef = useRef(false);
   const recordingRef = useRef(false);
   const lastTrackKeyRef = useRef("");
@@ -161,12 +171,34 @@ export default function Home() {
   useEffect(() => { actRef.current = act; }, [act]);
   useEffect(() => { setShowAudioDebug(new URLSearchParams(window.location.search).get("debugAudio") === "1"); }, []);
   useEffect(() => {
+    // Resume the last TV pairing so you don't mint a new code every session.
+    try {
+      const stored = window.localStorage.getItem(CONTROLLER_CODE_STORAGE_KEY);
+      if (stored && isDisplayCode(stored)) void ensureDisplaySession(normalizeDisplayCode(stored));
+    } catch { /* localStorage optional */ }
+  }, []);
+  useEffect(() => {
+    if (!displayCode) { setDisplayJoinUrl(""); return; }
+    try { window.localStorage.setItem(CONTROLLER_CODE_STORAGE_KEY, displayCode); } catch { /* optional */ }
+    setDisplayJoinUrl(`${window.location.origin}/display?code=${encodeURIComponent(displayCode)}`);
+  }, [displayCode]);
+  useEffect(() => {
     // Wake locks auto-release when the tab hides — re-acquire on return.
     const onVisibility = () => {
       if (!document.hidden && listeningRef.current) void acquireWakeLock();
     };
     document.addEventListener("visibilitychange", onVisibility);
     return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, []);
+  useEffect(() => {
+    // Some browsers (iOS Safari) require a user gesture for every wake-lock
+    // request, so the visibilitychange re-acquire can fail. Any tap while
+    // listening retries it.
+    const onTap = () => {
+      if (listeningRef.current && !wakeLockRef.current) void acquireWakeLock();
+    };
+    document.addEventListener("pointerdown", onTap);
+    return () => document.removeEventListener("pointerdown", onTap);
   }, []);
   useEffect(() => {
     if (act === "art") { const timer = window.setTimeout(() => setAct("art-fade"), ART_INFO_HOLD_MS); return () => window.clearTimeout(timer); }
@@ -291,12 +323,50 @@ export default function Home() {
       setStatus(listeningModeRef.current === "vinyl" ? "Vinyl sequence is active — music information only." : "Music information only.");
       return;
     }
+    // Mid-song identifies near the ending: skip curation. Fetching art takes
+    // longer than the track has left, and the display gets stuck on that work
+    // through the start of the next song.
+    const remainingMs = estimatedRemainingMs({
+      durationMs: track.durationMs,
+      timecodeMs: track.timecodeMs,
+      boundaryAt: vinylBoundaryAtRef.current,
+      now: trackScreenStartedAt,
+    });
+    if (shouldSkipArtworkForRemaining(remainingMs)) {
+      setStatus(
+        listeningModeRef.current === "vinyl"
+          ? "Near the end of this track — waiting for the next one…"
+          : "Near the end of this track — skipping artwork.",
+      );
+      preloadNextVinylArtwork();
+      return;
+    }
     const cached = resolveArtworkCache(key);
     const prepared = preparedArtwork && !shouldRefreshCachedArtwork(preparedArtwork.id, readRecentArtworkIds())
       ? preparedArtwork
       : undefined;
     const artwork = prepared ?? cached ?? await fetchArtwork(track);
     if (presentationId !== presentationIdRef.current) return;
+    // Advance may have moved the album index (and boundary) before the next
+    // presentTrack bumped presentationId — never paint art for a stale track.
+    if (identityKey(track) !== lastTrackKeyRef.current) return;
+    // Re-check after the (slow) curate round-trip — the song may have ended
+    // while we were waiting. Advance the identify-time timecode by wall clock.
+    const elapsedOnScreen = Date.now() - trackScreenStartedAt;
+    const remainingAfterCurate = estimatedRemainingMs({
+      durationMs: track.durationMs,
+      timecodeMs: track.timecodeMs !== undefined ? track.timecodeMs + elapsedOnScreen : undefined,
+      boundaryAt: vinylBoundaryAtRef.current,
+    });
+    if (shouldSkipArtworkForRemaining(remainingAfterCurate)) {
+      setStatus(
+        listeningModeRef.current === "vinyl"
+          ? "Near the end of this track — waiting for the next one…"
+          : "Near the end of this track — skipping artwork.",
+      );
+      preloadNextVinylArtwork();
+      return;
+    }
     cacheArtwork(key, artwork);
     rememberArtwork(artwork);
     setArt(artwork); setStatus("Artwork selected");
@@ -412,13 +482,27 @@ export default function Home() {
     const elapsedSinceCapture = Math.min(25_000, Math.max(0, Date.now() - capturedAt));
     const anchoredTimecode = timecodeAtCaptureMs(recognizedTrack.timecodeMs, sampleDurationMs, elapsedSinceCapture);
     tracks[matchedIndex].timecodeMs = anchoredTimecode;
-    const remaining = remainingTrackMs(recognizedTrack.durationMs ?? tracks[matchedIndex].durationMs, anchoredTimecode);
-    vinylBoundaryAtRef.current = remaining ? Date.now() + remaining : 0;
+    const now = Date.now();
+    const plan = planVinylBoundaryAfterIdentify({
+      now,
+      durationMs: recognizedTrack.durationMs ?? tracks[matchedIndex].durationMs,
+      timecodeMs: anchoredTimecode,
+    });
+    vinylBoundaryAtRef.current = plan.boundaryAt;
     vinylPauseAtRef.current = 0;
     vinylGapPendingRef.current = false;
     vinylGapLatchRef.current = null;
     vinylParkedRef.current = false;
     clearVinylEndConfirm();
+    if (plan.armEndConfirmNow) {
+      // Mid-song lock with little time left — don't wait out a soft timer.
+      // Start the gapless end-confirm capture immediately so the next track
+      // is identified within ~4s + recognition once it starts.
+      vinylEndConfirmPendingRef.current = true;
+      vinylEndConfirmArmedAtRef.current = now;
+      vinylEndConfirmGaplessRef.current = true;
+      setAudioDebug((debug) => ({ ...debug, reason: "end-capturing:near-lock" }));
+    }
     nextFallbackAtRef.current = 0;
     scheduleVinylHeartbeats();
     updateVinylProgress();
@@ -903,34 +987,55 @@ export default function Home() {
   /**
    * Screen Wake Lock keeps the controller phone awake while listening — the
    * whole detection pipeline dies if the screen locks or the tab suspends.
-   * Wake locks auto-release when the tab hides, so re-acquire on visibility
-   * return (see the visibilitychange effect below).
+   * Browsers require a fresh user gesture for each request, so this must be
+   * called synchronously from the Listen tap (before any await) — by the time
+   * the mic permission prompt is answered, the gesture has expired and the
+   * request is silently rejected. Wake locks also auto-release when the tab
+   * hides, so re-acquire on visibility return and on any later tap.
    */
   async function acquireWakeLock() {
-    const wakeLock = (navigator as Navigator & { wakeLock?: { request: (type: "screen") => Promise<{ release: () => Promise<void> }> } }).wakeLock;
-    if (!wakeLock || wakeLockRef.current) return;
+    const wakeLock = (navigator as Navigator & { wakeLock?: { request: (type: "screen") => Promise<WakeLockSentinelLike> } }).wakeLock;
+    if (!wakeLock) { setWakeLockState("unsupported"); return; }
+    if (wakeLockRef.current) return;
+    wakeLockWantedRef.current = true;
     try {
-      wakeLockRef.current = await wakeLock.request("screen");
+      const sentinel = await wakeLock.request("screen");
+      if (!wakeLockWantedRef.current) { void sentinel.release().catch(() => undefined); return; }
+      wakeLockRef.current = sentinel;
+      setWakeLockState("on");
+      sentinel.addEventListener?.("release", () => {
+        if (wakeLockRef.current === sentinel) wakeLockRef.current = null;
+        setWakeLockState("off");
+      });
     } catch {
       wakeLockRef.current = null;
-      setStatus("Listening — keep this screen awake so detection keeps running.");
+      setWakeLockState("off");
+      if (listeningRef.current) setStatus("Listening — keep this screen awake so detection keeps running.");
     }
   }
 
   function releaseWakeLock() {
+    wakeLockWantedRef.current = false;
     const sentinel = wakeLockRef.current;
     wakeLockRef.current = null;
+    setWakeLockState("off");
     void sentinel?.release().catch(() => undefined);
   }
 
   async function startListenMode() {
     if (listeningRef.current) return;
+    // Request the wake lock first, synchronously inside the tap gesture —
+    // after the awaits below (mic prompt, AudioContext) the gesture has
+    // expired and browsers silently reject the request.
+    void acquireWakeLock();
     try {
       if (!window.isSecureContext) {
+        releaseWakeLock();
         setStatus("Microphone needs HTTPS or localhost. Use this computer as the controller (localhost:3000); keep the phone/TV on /display only.");
         return;
       }
       if (!navigator.mediaDevices?.getUserMedia) {
+        releaseWakeLock();
         setStatus("This browser cannot access the microphone.");
         return;
       }
@@ -987,8 +1092,8 @@ export default function Home() {
       if (monitorIntervalRef.current) window.clearInterval(monitorIntervalRef.current);
       monitorIntervalRef.current = window.setInterval(monitorSound, FEATURE_INTERVAL_MS);
       monitorSound();
-      void acquireWakeLock();
     } catch (error) {
+      releaseWakeLock();
       const name = error instanceof DOMException ? error.name : "";
       if (name === "NotAllowedError" || name === "PermissionDeniedError") {
         setStatus("Microphone permission was denied. Allow mic access and try again.");
@@ -1034,24 +1139,41 @@ export default function Home() {
       : "Artwork curation is off — Vinyl Mode will show track and album information only.");
   }
 
-  async function ensureDisplaySession() {
-    setDisplayPairStatus("Creating a TV pairing code…");
+  async function ensureDisplaySession(preferredCode?: string, options?: { rotate?: boolean }) {
+    const rotating = Boolean(options?.rotate);
+    setDisplayPairStatus(preferredCode && !rotating ? "Reconnecting to your TV…" : "Creating a TV pairing code…");
     try {
-      const response = await fetch("/api/display/session", { method: "POST" });
+      const response = await fetch("/api/display/session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(preferredCode && !rotating ? { code: preferredCode } : {}),
+      });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) {
         setDisplayPairStatus(typeof payload.error === "string" ? payload.error : "Could not create a pairing code.");
         return;
       }
-      if (typeof payload.code !== "string") {
+      if (typeof payload.code !== "string" || !isDisplayCode(payload.code)) {
         setDisplayPairStatus("Pairing response was incomplete.");
         return;
       }
-      setDisplayCode(payload.code);
-      setDisplayPairStatus("Open /display on the TV and enter this code.");
+      const code = normalizeDisplayCode(payload.code);
+      setDisplayCode(code);
+      setDisplayPairStatus(
+        preferredCode && !rotating
+          ? "Linked — this phone stays paired until you forget."
+          : "Scan the QR to open the TV page, or type the code at /display. Stays linked after that.",
+      );
     } catch (error) {
       setDisplayPairStatus(error instanceof Error ? error.message : "Could not create a pairing code.");
     }
+  }
+
+  function forgetDisplaySession() {
+    try { window.localStorage.removeItem(CONTROLLER_CODE_STORAGE_KEY); } catch { /* optional */ }
+    setDisplayCode("");
+    setDisplayJoinUrl("");
+    setDisplayPairStatus("TV unlinked. Tap Show on TV when you want to pair again.");
   }
 
   function buildDisplaySnapshot(): DisplaySnapshot {
@@ -1107,13 +1229,25 @@ export default function Home() {
   const tvPairPanel = (
     <aside className="tv-pair" aria-label="Television pairing">
       <div className="tv-pair__copy">
-        <strong>{displayCode ? "TV pairing code" : "Show on TV"}</strong>
-        <span>{displayPairStatus || (displayCode ? "Open /display on the TV and enter this code." : "Create a short code the television can join.")}</span>
+        <strong>{displayCode ? "Linked to TV" : "Show on TV"}</strong>
+        <span>{displayPairStatus || (displayCode ? "This phone stays paired until you forget." : "Create a code once — scan the QR on the TV, then stay linked.")}</span>
       </div>
-      {displayCode ? <p className="tv-pair__code" aria-live="polite">{displayCode}</p> : null}
-      <button type="button" onClick={() => void ensureDisplaySession()}>
-        {displayCode ? "New code" : "Show on TV"}
-      </button>
+      {displayCode ? (
+        <div className="tv-pair__link">
+          {displayJoinUrl ? <PairingQr url={displayJoinUrl} label={`QR code opens ${displayJoinUrl}`} /> : null}
+          <p className="tv-pair__code" aria-live="polite">{displayCode}</p>
+        </div>
+      ) : null}
+      <div className="tv-pair__actions">
+        <button type="button" onClick={() => void ensureDisplaySession(undefined, { rotate: Boolean(displayCode) })}>
+          {displayCode ? "New code" : "Show on TV"}
+        </button>
+        {displayCode ? (
+          <button type="button" className="tv-pair__ghost" onClick={forgetDisplaySession}>
+            Forget TV
+          </button>
+        ) : null}
+      </div>
     </aside>
   );
   const vinylSeconds = vinylBoundaryAtRef.current ? Math.round((vinylBoundaryAtRef.current - Date.now()) / 1000) : undefined;
@@ -1128,7 +1262,7 @@ export default function Home() {
       : null,
     vinylLastAdvanceReasonRef.current !== "none" ? `adv:${vinylLastAdvanceReasonRef.current}` : null,
   ].filter(Boolean).join(" ") : "";
-  const debugPanel = showAudioDebug ? <aside className="audio-debug" aria-label="Audio detector diagnostics"><strong>{audioDebug.state}</strong><span>{listeningMode}</span>{activeMicrophone && <span>{activeMicrophone}</span>}<span>change {audioDebug.score.toFixed(3)}</span><span>rms {audioDebug.rms.toFixed(3)}</span><span>AudD calls {auddCalls}</span>{vinylSeconds !== undefined && <span>next {vinylSeconds}s</span>}{vinylHeartbeatSeconds !== undefined && <span>heartbeat {vinylHeartbeatSeconds}s</span>}{vinylDebugFlags && <span>{vinylDebugFlags}</span>}<span>{audioDebug.reason}</span>{captureDebug && <span>{captureDebug}</span>}{lastSampleUrl && <a href={lastSampleUrl} download="music-art-last-sample.wav" onClick={(event) => event.stopPropagation()}>download sample</a>}</aside> : null;
+  const debugPanel = showAudioDebug ? <aside className="audio-debug" aria-label="Audio detector diagnostics"><strong>{audioDebug.state}</strong><span>{listeningMode}</span>{activeMicrophone && <span>{activeMicrophone}</span>}<span>change {audioDebug.score.toFixed(3)}</span><span>rms {audioDebug.rms.toFixed(3)}</span><span>AudD calls {auddCalls}</span><span>wake {wakeLockState}</span>{vinylSeconds !== undefined && <span>next {vinylSeconds}s</span>}{vinylHeartbeatSeconds !== undefined && <span>heartbeat {vinylHeartbeatSeconds}s</span>}{vinylDebugFlags && <span>{vinylDebugFlags}</span>}<span>{audioDebug.reason}</span>{captureDebug && <span>{captureDebug}</span>}{lastSampleUrl && <a href={lastSampleUrl} download="music-art-last-sample.wav" onClick={(event) => event.stopPropagation()}>download sample</a>}</aside> : null;
   const transitionLabel = recognitionPhase === "suspected" ? "Possible new song" : recognitionPhase === "checking" ? "Identifying new song" : "New selection found";
   const vinylSequenceIsActive = listeningMode === "vinyl" && Boolean(vinylAlbumRef.current);
   const transitionIndicator = !vinylSequenceIsActive && (recognitionPhase === "suspected" || recognitionPhase === "checking" || recognitionPhase === "matched") ? <aside className="transition-indicator" data-phase={recognitionPhase} aria-live="polite"><span className="signal-bars" aria-hidden="true"><i /><i /><i /><i /></span><span><small>{recognitionPhase === "suspected" ? "Listening closely" : recognitionPhase === "checking" ? "Checking the sound" : "Now playing"}</small><strong>{transitionLabel}</strong></span></aside> : null;

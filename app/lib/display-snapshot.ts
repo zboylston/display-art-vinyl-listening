@@ -35,7 +35,10 @@ export type DisplaySnapshot = {
 };
 
 export const DISPLAY_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-export const DISPLAY_SESSION_TTL_SECONDS = 60 * 60 * 4;
+/** Keep remembered phone↔TV pairs alive for a month of inactivity; publish/poll refresh the TTL. */
+export const DISPLAY_SESSION_TTL_SECONDS = 60 * 60 * 24 * 30;
+export const CONTROLLER_CODE_STORAGE_KEY = "needle-frame:controller-code";
+export const DISPLAY_CODE_STORAGE_KEY = "needle-frame:display-code";
 
 export function createEmptySnapshot(partial?: Partial<DisplaySnapshot>): DisplaySnapshot {
   return {

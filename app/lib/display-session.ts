@@ -29,6 +29,12 @@ function sessionKey(code: string) {
   return `display:session:${normalizeDisplayCode(code)}`;
 }
 
+async function writeEmptySession(client: Redis, code: string) {
+  await client.set(sessionKey(code), JSON.stringify({ snapshot: null }), {
+    ex: DISPLAY_SESSION_TTL_SECONDS,
+  });
+}
+
 export async function createDisplaySession() {
   const client = redis();
   for (let attempt = 0; attempt < 8; attempt += 1) {
@@ -42,6 +48,25 @@ export async function createDisplaySession() {
   throw new Error("Could not allocate a display pairing code.");
 }
 
+/**
+ * Resume a remembered pairing code (refresh TTL or recreate if Redis expired),
+ * or mint a brand-new code when none is preferred.
+ */
+export async function ensureDisplaySession(preferredCode?: string) {
+  if (!preferredCode) return createDisplaySession();
+  const normalized = normalizeDisplayCode(preferredCode);
+  if (!isDisplayCode(normalized)) throw new Error("Invalid display pairing code.");
+  const client = redis();
+  const key = sessionKey(normalized);
+  const existing = await client.get(key);
+  if (existing === null) {
+    await writeEmptySession(client, normalized);
+    return normalized;
+  }
+  await client.expire(key, DISPLAY_SESSION_TTL_SECONDS);
+  return normalized;
+}
+
 export async function publishDisplaySnapshot(code: string, snapshot: DisplaySnapshot) {
   const normalized = normalizeDisplayCode(code);
   if (!isDisplayCode(normalized)) throw new Error("Invalid display pairing code.");
@@ -49,8 +74,7 @@ export async function publishDisplaySnapshot(code: string, snapshot: DisplaySnap
   if (!parsed) throw new Error("Invalid display snapshot.");
   const client = redis();
   const key = sessionKey(normalized);
-  const existing = await client.get(key);
-  if (existing === null) throw new Error("Unknown display session. Create a new pairing code.");
+  // Recreate under the same code if the Redis TTL lapsed — remembered pairs stay linked.
   await client.set(key, JSON.stringify({ snapshot: { ...parsed, updatedAt: Date.now() } }), {
     ex: DISPLAY_SESSION_TTL_SECONDS,
   });
@@ -60,8 +84,11 @@ export async function readDisplaySession(code: string): Promise<{ exists: boolea
   const normalized = normalizeDisplayCode(code);
   if (!isDisplayCode(normalized)) throw new Error("Invalid display pairing code.");
   const client = redis();
-  const value = await client.get(sessionKey(normalized));
+  const key = sessionKey(normalized);
+  const value = await client.get(key);
   if (value === null) return { exists: false, snapshot: null };
+  // TV polling alone should keep a paired session warm.
+  await client.expire(key, DISPLAY_SESSION_TTL_SECONDS);
   const payload =
     typeof value === "string"
       ? (JSON.parse(value) as { snapshot?: unknown })
