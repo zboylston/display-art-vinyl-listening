@@ -4,6 +4,14 @@ export type VinylProgress = {
   totalTracks: number;
 };
 
+/** Seconds left before the predicted end-of-song boundary (for the header countdown). */
+export function vinylCountdownSeconds(boundaryAt: number | undefined, now: number, windowSeconds = 10) {
+  if (!boundaryAt) return undefined;
+  const remaining = boundaryAt - now;
+  if (remaining <= 0 || remaining > windowSeconds * 1000) return undefined;
+  return Math.max(0, Math.ceil(remaining / 1000));
+}
+
 function sideName(discNumber?: number) {
   if (!discNumber || discNumber < 1 || discNumber > 26) return "";
   return `SIDE ${String.fromCharCode(64 + discNumber)}`;

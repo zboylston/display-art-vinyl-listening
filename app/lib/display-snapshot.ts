@@ -31,6 +31,8 @@ export type DisplaySnapshot = {
   currentTrack: DisplayTrack | null;
   artwork: DisplayArtwork | null;
   vinylProgress: VinylProgress | null;
+  /** Predicted end-of-song boundary (epoch ms) — drives the header countdown. */
+  vinylBoundaryAt?: number;
   updatedAt: number;
 };
 
@@ -104,6 +106,7 @@ export function parseDisplaySnapshot(value: unknown): DisplaySnapshot | null {
     currentTrack: parseTrack(raw.currentTrack),
     artwork: parseArtwork(raw.artwork),
     vinylProgress: parseVinylProgress(raw.vinylProgress),
+    ...(typeof raw.vinylBoundaryAt === "number" ? { vinylBoundaryAt: raw.vinylBoundaryAt } : {}),
     updatedAt: typeof raw.updatedAt === "number" ? raw.updatedAt : Date.now(),
   };
 }

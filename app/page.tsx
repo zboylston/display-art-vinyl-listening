@@ -1218,6 +1218,7 @@ export default function Home() {
         rationale: art.rationale,
       },
       vinylProgress,
+      ...(vinylBoundaryAtRef.current ? { vinylBoundaryAt: vinylBoundaryAtRef.current } : {}),
       updatedAt: Date.now(),
     };
   }
@@ -1320,6 +1321,7 @@ export default function Home() {
             rationale: art.rationale,
           },
           vinylProgress,
+          ...(vinylBoundaryAtRef.current ? { vinylBoundaryAt: vinylBoundaryAtRef.current } : {}),
           updatedAt: Date.now(),
         }}
         chrome={<>{transitionIndicator}{debugPanel}</>}
