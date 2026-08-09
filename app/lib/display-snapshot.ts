@@ -31,11 +31,22 @@ export type DisplaySnapshot = {
   currentTrack: DisplayTrack | null;
   artwork: DisplayArtwork | null;
   vinylProgress: VinylProgress | null;
+  /** Predicted end-of-song boundary (epoch ms) — drives the header countdown. */
+  vinylBoundaryAt?: number;
   updatedAt: number;
 };
 
 export const DISPLAY_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-export const DISPLAY_SESSION_TTL_SECONDS = 60 * 60 * 4;
+/** Keep remembered phone↔TV pairs alive for a month of inactivity; publish/poll refresh the TTL. */
+export const DISPLAY_SESSION_TTL_SECONDS = 60 * 60 * 24 * 30;
+export const CONTROLLER_CODE_STORAGE_KEY = "needle-frame:controller-code";
+export const DISPLAY_CODE_STORAGE_KEY = "needle-frame:display-code";
+
+/** Phone controller URL encoded in the TV QR — scan opens the app already paired. */
+export function pairControllerUrl(origin: string, code: string) {
+  const normalized = normalizeDisplayCode(code);
+  return `${origin.replace(/\/$/, "")}/?pair=${encodeURIComponent(normalized)}`;
+}
 
 export function createEmptySnapshot(partial?: Partial<DisplaySnapshot>): DisplaySnapshot {
   return {
@@ -95,6 +106,7 @@ export function parseDisplaySnapshot(value: unknown): DisplaySnapshot | null {
     currentTrack: parseTrack(raw.currentTrack),
     artwork: parseArtwork(raw.artwork),
     vinylProgress: parseVinylProgress(raw.vinylProgress),
+    ...(typeof raw.vinylBoundaryAt === "number" ? { vinylBoundaryAt: raw.vinylBoundaryAt } : {}),
     updatedAt: typeof raw.updatedAt === "number" ? raw.updatedAt : Date.now(),
   };
 }

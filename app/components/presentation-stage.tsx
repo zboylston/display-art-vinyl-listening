@@ -1,7 +1,7 @@
 "use client";
 
-import type { CSSProperties, ReactNode } from "react";
-import { vinylFolioCopy } from "../lib/vinyl-folio";
+import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
+import { vinylCountdownSeconds, vinylFolioCopy } from "../lib/vinyl-folio";
 import type { DisplayArtwork, DisplaySnapshot, DisplayTrack } from "../lib/display-snapshot";
 
 type PresentationStageProps = {
@@ -16,11 +16,28 @@ function identityKey(track: DisplayTrack) {
   return `${track.artist}|${track.title}`.toLowerCase();
 }
 
-function VinylFolio({ track, progress, screen, className }: {
+/** Live last-10s countdown to the predicted boundary — UX + transition diagnosis. */
+function useVinylCountdown(boundaryAt?: number) {
+  const [seconds, setSeconds] = useState<number | undefined>(undefined);
+  useEffect(() => {
+    if (!boundaryAt) {
+      setSeconds(undefined);
+      return;
+    }
+    const update = () => setSeconds(vinylCountdownSeconds(boundaryAt, Date.now()));
+    update();
+    const timer = window.setInterval(update, 500);
+    return () => window.clearInterval(timer);
+  }, [boundaryAt]);
+  return seconds;
+}
+
+function VinylFolio({ track, progress, screen, className, countdownSeconds }: {
   track: DisplayTrack;
   progress: NonNullable<DisplaySnapshot["vinylProgress"]>;
   screen: "album" | "art";
   className?: string;
+  countdownSeconds?: number;
 }) {
   const folio = vinylFolioCopy(progress);
   return (
@@ -28,15 +45,22 @@ function VinylFolio({ track, progress, screen, className }: {
       <p className="vinyl-folio__label"><span />Vinyl</p>
       {screen === "art" && <p className="vinyl-folio__title">{track.title}</p>}
       <p className="vinyl-folio__sequence">{folio.sequence}</p>
+      {countdownSeconds !== undefined && (
+        <p className="vinyl-folio__countdown" role="status" aria-live="polite" aria-label={`Next track in ${countdownSeconds} seconds`}>
+          <span className="vinyl-folio__countdown-label">Next in</span>
+          <span className="vinyl-folio__countdown-value">{countdownSeconds}</span>
+        </p>
+      )}
     </aside>
   );
 }
 
-function GalleryMusicHeader({ track, vinyl }: {
+function GalleryMusicHeader({ track, vinyl, countdownSeconds }: {
   track: DisplayTrack;
   vinyl: NonNullable<DisplaySnapshot["vinylProgress"]> | null;
+  countdownSeconds?: number;
 }) {
-  if (vinyl) return <VinylFolio track={track} progress={vinyl} screen="art" />;
+  if (vinyl) return <VinylFolio track={track} progress={vinyl} screen="art" countdownSeconds={countdownSeconds} />;
   return (
     <aside className="gallery-music" aria-label="Now playing">
       <p className="vinyl-folio__label"><span />Now playing</p>
@@ -90,6 +114,7 @@ export function PresentationStage({
   const vinyl = snapshot.listeningMode === "vinyl" && snapshot.vinylProgress && track
     ? snapshot.vinylProgress
     : null;
+  const countdownSeconds = useVinylCountdown(vinyl ? snapshot.vinylBoundaryAt : undefined);
 
   if (!isStageAct(snapshot.act) || !track) {
     return (
@@ -136,7 +161,7 @@ export function PresentationStage({
               </p>
             </div>
           </section>
-          {vinyl && <VinylFolio track={track} progress={vinyl} screen="album" />}
+          {vinyl && <VinylFolio track={track} progress={vinyl} screen="album" countdownSeconds={countdownSeconds} />}
           {showCurationStatus && snapshot.status && (
             <p className="curation-status" role="status"><span aria-hidden="true" />{snapshot.status}</p>
           )}
@@ -173,7 +198,7 @@ export function PresentationStage({
           <h2>{art.artist}</h2>
           <p>{art.date} · {art.museum}</p>
         </section>
-        {vinyl && <VinylFolio track={track} progress={vinyl} screen="art" />}
+        {vinyl && <VinylFolio track={track} progress={vinyl} screen="art" countdownSeconds={countdownSeconds} />}
         {chrome}
       </StageFrame>
     );
@@ -191,7 +216,7 @@ export function PresentationStage({
       <div className="gallery-overlay" aria-hidden="true" />
       <header className="gallery-header">
         <ArtCard art={art} />
-        <GalleryMusicHeader track={track} vinyl={vinyl} />
+        <GalleryMusicHeader track={track} vinyl={vinyl} countdownSeconds={countdownSeconds} />
       </header>
       {chrome}
     </StageFrame>

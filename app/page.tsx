@@ -4,7 +4,12 @@ import { useEffect, useRef, useState } from "react";
 import { PresentationStage } from "./components/presentation-stage";
 import { AudioChangeDetector, rmsFromSamples, spectrumBandsFromDb, type DetectorState } from "./lib/audio-change-detector";
 import type { DisplaySnapshot } from "./lib/display-snapshot";
-import { sanitizeDisplayStatus } from "./lib/display-snapshot";
+import {
+  CONTROLLER_CODE_STORAGE_KEY,
+  isDisplayCode,
+  normalizeDisplayCode,
+  sanitizeDisplayStatus,
+} from "./lib/display-snapshot";
 import { canonicalTrackKey, INITIAL_DISCOVERY_CAPTURE_MS, noMatchRetryDelay, RecognitionGate, textTrackKey } from "./lib/recognition";
 import { parseRecentArtworkIds, pushRecentArtworkId, shouldRefreshCachedArtwork } from "./lib/recent-artwork";
 import {
@@ -24,7 +29,7 @@ import {
   type VinylGapLatch,
 } from "./lib/vinyl-advance";
 import { planVinylHeartbeats } from "./lib/vinyl-heartbeats";
-import { isNearVinylBoundary, refinedVinylBoundaryAt, remainingTrackMs, shiftedBoundaryAfterPause, timecodeAtCaptureMs } from "./lib/vinyl-mode";
+import { estimatedRemainingMs, isNearVinylBoundary, planVinylBoundaryAfterIdentify, refinedVinylBoundaryAt, remainingTrackMs, shiftedBoundaryAfterPause, shouldSkipArtworkForRemaining, timecodeAtCaptureMs } from "./lib/vinyl-mode";
 import type { VinylProgress } from "./lib/vinyl-folio";
 import { encodeMonoWav, prepareRecognitionAudio } from "./lib/wav";
 
@@ -108,6 +113,7 @@ export default function Home() {
   const [recognitionPhase, setRecognitionPhase] = useState<RecognitionPhase>("idle");
   const [displayCode, setDisplayCode] = useState("");
   const [displayPairStatus, setDisplayPairStatus] = useState("");
+  const [displayCodeDraft, setDisplayCodeDraft] = useState("");
   const currentTrackRef = useRef(currentTrack);
   const actRef = useRef<Act>("ready");
   const listeningModeRef = useRef<ListeningMode>("live");
@@ -163,6 +169,31 @@ export default function Home() {
   useEffect(() => { currentTrackRef.current = currentTrack; }, [currentTrack]);
   useEffect(() => { actRef.current = act; }, [act]);
   useEffect(() => { setShowAudioDebug(new URLSearchParams(window.location.search).get("debugAudio") === "1"); }, []);
+  useEffect(() => {
+    // TV QR encodes /?pair=CODE — scanning opens the phone already linked.
+    // Fall back to the last remembered code when there is no scan param.
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const fromScan = params.get("pair") ?? params.get("code");
+      if (fromScan && isDisplayCode(fromScan)) {
+        const code = normalizeDisplayCode(fromScan);
+        void ensureDisplaySession(code);
+        if (window.history.replaceState) {
+          const url = new URL(window.location.href);
+          url.searchParams.delete("pair");
+          url.searchParams.delete("code");
+          window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+        }
+        return;
+      }
+      const stored = window.localStorage.getItem(CONTROLLER_CODE_STORAGE_KEY);
+      if (stored && isDisplayCode(stored)) void ensureDisplaySession(normalizeDisplayCode(stored));
+    } catch { /* localStorage optional */ }
+  }, []);
+  useEffect(() => {
+    if (!displayCode) return;
+    try { window.localStorage.setItem(CONTROLLER_CODE_STORAGE_KEY, displayCode); } catch { /* optional */ }
+  }, [displayCode]);
   useEffect(() => {
     // Wake locks auto-release when the tab hides — re-acquire on return.
     const onVisibility = () => {
@@ -304,12 +335,50 @@ export default function Home() {
       setStatus(listeningModeRef.current === "vinyl" ? "Vinyl sequence is active — music information only." : "Music information only.");
       return;
     }
+    // Mid-song identifies near the ending: skip curation. Fetching art takes
+    // longer than the track has left, and the display gets stuck on that work
+    // through the start of the next song.
+    const remainingMs = estimatedRemainingMs({
+      durationMs: track.durationMs,
+      timecodeMs: track.timecodeMs,
+      boundaryAt: vinylBoundaryAtRef.current,
+      now: trackScreenStartedAt,
+    });
+    if (shouldSkipArtworkForRemaining(remainingMs)) {
+      setStatus(
+        listeningModeRef.current === "vinyl"
+          ? "Near the end of this track — waiting for the next one…"
+          : "Near the end of this track — skipping artwork.",
+      );
+      preloadNextVinylArtwork();
+      return;
+    }
     const cached = resolveArtworkCache(key);
     const prepared = preparedArtwork && !shouldRefreshCachedArtwork(preparedArtwork.id, readRecentArtworkIds())
       ? preparedArtwork
       : undefined;
     const artwork = prepared ?? cached ?? await fetchArtwork(track);
     if (presentationId !== presentationIdRef.current) return;
+    // Advance may have moved the album index (and boundary) before the next
+    // presentTrack bumped presentationId — never paint art for a stale track.
+    if (identityKey(track) !== lastTrackKeyRef.current) return;
+    // Re-check after the (slow) curate round-trip — the song may have ended
+    // while we were waiting. Advance the identify-time timecode by wall clock.
+    const elapsedOnScreen = Date.now() - trackScreenStartedAt;
+    const remainingAfterCurate = estimatedRemainingMs({
+      durationMs: track.durationMs,
+      timecodeMs: track.timecodeMs !== undefined ? track.timecodeMs + elapsedOnScreen : undefined,
+      boundaryAt: vinylBoundaryAtRef.current,
+    });
+    if (shouldSkipArtworkForRemaining(remainingAfterCurate)) {
+      setStatus(
+        listeningModeRef.current === "vinyl"
+          ? "Near the end of this track — waiting for the next one…"
+          : "Near the end of this track — skipping artwork.",
+      );
+      preloadNextVinylArtwork();
+      return;
+    }
     cacheArtwork(key, artwork);
     rememberArtwork(artwork);
     setArt(artwork); setStatus("Artwork selected");
@@ -425,13 +494,27 @@ export default function Home() {
     const elapsedSinceCapture = Math.min(25_000, Math.max(0, Date.now() - capturedAt));
     const anchoredTimecode = timecodeAtCaptureMs(recognizedTrack.timecodeMs, sampleDurationMs, elapsedSinceCapture);
     tracks[matchedIndex].timecodeMs = anchoredTimecode;
-    const remaining = remainingTrackMs(recognizedTrack.durationMs ?? tracks[matchedIndex].durationMs, anchoredTimecode);
-    vinylBoundaryAtRef.current = remaining ? Date.now() + remaining : 0;
+    const now = Date.now();
+    const plan = planVinylBoundaryAfterIdentify({
+      now,
+      durationMs: recognizedTrack.durationMs ?? tracks[matchedIndex].durationMs,
+      timecodeMs: anchoredTimecode,
+    });
+    vinylBoundaryAtRef.current = plan.boundaryAt;
     vinylPauseAtRef.current = 0;
     vinylGapPendingRef.current = false;
     vinylGapLatchRef.current = null;
     vinylParkedRef.current = false;
     clearVinylEndConfirm();
+    if (plan.armEndConfirmNow) {
+      // Mid-song lock with little time left — don't wait out a soft timer.
+      // Start the gapless end-confirm capture immediately so the next track
+      // is identified within ~4s + recognition once it starts.
+      vinylEndConfirmPendingRef.current = true;
+      vinylEndConfirmArmedAtRef.current = now;
+      vinylEndConfirmGaplessRef.current = true;
+      setAudioDebug((debug) => ({ ...debug, reason: "end-capturing:near-lock" }));
+    }
     nextFallbackAtRef.current = 0;
     scheduleVinylHeartbeats();
     updateVinylProgress();
@@ -1068,24 +1151,46 @@ export default function Home() {
       : "Artwork curation is off — Vinyl Mode will show track and album information only.");
   }
 
-  async function ensureDisplaySession() {
-    setDisplayPairStatus("Creating a TV pairing code…");
+  async function ensureDisplaySession(preferredCode?: string) {
+    if (!preferredCode || !isDisplayCode(preferredCode)) {
+      setDisplayPairStatus("Scan the QR on the TV, or type the six-character code shown there.");
+      return;
+    }
+    const code = normalizeDisplayCode(preferredCode);
+    setDisplayPairStatus("Linking to your TV…");
     try {
-      const response = await fetch("/api/display/session", { method: "POST" });
+      const response = await fetch("/api/display/session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code }),
+      });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) {
-        setDisplayPairStatus(typeof payload.error === "string" ? payload.error : "Could not create a pairing code.");
+        setDisplayPairStatus(typeof payload.error === "string" ? payload.error : "Could not link to the TV.");
         return;
       }
-      if (typeof payload.code !== "string") {
+      if (typeof payload.code !== "string" || !isDisplayCode(payload.code)) {
         setDisplayPairStatus("Pairing response was incomplete.");
         return;
       }
-      setDisplayCode(payload.code);
-      setDisplayPairStatus("Open /display on the TV and enter this code.");
+      setDisplayCode(normalizeDisplayCode(payload.code));
+      setDisplayCodeDraft("");
+      setDisplayPairStatus("Linked — this phone stays paired until you forget.");
     } catch (error) {
-      setDisplayPairStatus(error instanceof Error ? error.message : "Could not create a pairing code.");
+      setDisplayPairStatus(error instanceof Error ? error.message : "Could not link to the TV.");
     }
+  }
+
+  function submitDisplayCode(event: React.FormEvent) {
+    event.preventDefault();
+    void ensureDisplaySession(displayCodeDraft);
+  }
+
+  function forgetDisplaySession() {
+    try { window.localStorage.removeItem(CONTROLLER_CODE_STORAGE_KEY); } catch { /* optional */ }
+    setDisplayCode("");
+    setDisplayCodeDraft("");
+    setDisplayPairStatus("TV unlinked. Scan the QR on the TV to pair again.");
   }
 
   function buildDisplaySnapshot(): DisplaySnapshot {
@@ -1113,6 +1218,7 @@ export default function Home() {
         rationale: art.rationale,
       },
       vinylProgress,
+      ...(vinylBoundaryAtRef.current ? { vinylBoundaryAt: vinylBoundaryAtRef.current } : {}),
       updatedAt: Date.now(),
     };
   }
@@ -1141,13 +1247,34 @@ export default function Home() {
   const tvPairPanel = (
     <aside className="tv-pair" aria-label="Television pairing">
       <div className="tv-pair__copy">
-        <strong>{displayCode ? "TV pairing code" : "Show on TV"}</strong>
-        <span>{displayPairStatus || (displayCode ? "Open /display on the TV and enter this code." : "Create a short code the television can join.")}</span>
+        <strong>{displayCode ? "Linked to TV" : "Show on TV"}</strong>
+        <span>{displayPairStatus || (displayCode ? "This phone stays paired until you forget." : "Open /display on the TV, then scan its QR with this phone.")}</span>
       </div>
-      {displayCode ? <p className="tv-pair__code" aria-live="polite">{displayCode}</p> : null}
-      <button type="button" onClick={() => void ensureDisplaySession()}>
-        {displayCode ? "New code" : "Show on TV"}
-      </button>
+      {displayCode ? (
+        <p className="tv-pair__code" aria-live="polite">{displayCode}</p>
+      ) : (
+        <form className="tv-pair__form" onSubmit={submitDisplayCode}>
+          <input
+            value={displayCodeDraft}
+            onChange={(event) => setDisplayCodeDraft(normalizeDisplayCode(event.target.value))}
+            autoCapitalize="characters"
+            autoCorrect="off"
+            spellCheck={false}
+            maxLength={6}
+            placeholder="TV code"
+            inputMode="text"
+            aria-label="TV pairing code"
+          />
+          <button type="submit" disabled={displayCodeDraft.length < 6}>Link</button>
+        </form>
+      )}
+      {displayCode ? (
+        <div className="tv-pair__actions">
+          <button type="button" className="tv-pair__ghost" onClick={forgetDisplaySession}>
+            Forget TV
+          </button>
+        </div>
+      ) : null}
     </aside>
   );
   const vinylSeconds = vinylBoundaryAtRef.current ? Math.round((vinylBoundaryAtRef.current - Date.now()) / 1000) : undefined;
@@ -1194,6 +1321,7 @@ export default function Home() {
             rationale: art.rationale,
           },
           vinylProgress,
+          ...(vinylBoundaryAtRef.current ? { vinylBoundaryAt: vinylBoundaryAtRef.current } : {}),
           updatedAt: Date.now(),
         }}
         chrome={<>{transitionIndicator}{debugPanel}</>}

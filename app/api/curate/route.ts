@@ -16,9 +16,10 @@ import {
 const metApi = "https://collectionapi.metmuseum.org/public/collection/v1";
 const clevelandApi = "https://openaccess-api.clevelandart.org/api/artworks/";
 const chicagoApi = "https://api.artic.edu/api/v1/artworks/search";
+const smithsonianApi = "https://api.si.edu/openaccess/api/v1.0/search";
 const model = "gpt-5.6-terra";
 const reasoning = { effort: "high" as const };
-type ArtSource = "met" | "cleveland" | "artic";
+type ArtSource = "met" | "cleveland" | "artic" | "smithsonian";
 
 type Track = { artist?: string; title?: string; album?: string; year?: string; genre?: string };
 type Candidate = {
@@ -71,7 +72,7 @@ async function createDossier(client: OpenAI, track: CleanTrack): Promise<SongDos
       },
       {
         role: "user",
-        content: `Track identity: ${JSON.stringify(track)}\n\nReturn exactly these JSON keys:\n- confidence: high|medium|low — high only if you know this specific recording (this artist/album take) beyond the title words\n- known_facts: up to 6 short facts about THIS recording or its performers you are reasonably sure about\n- uncertain: up to 6 gaps (arrangement, personnel, whether it is a remake, etc.)\n- sonic_and_thematic_reading: 2-4 sentences on rhythm feel, instrumentation/timbre, energy, setting, and themes for THIS take. If it may be a remake or cover, say how this version likely differs from the famous original. If confidence is low, lean on album/artist/genre priors and say so — still describe probable groove and energy, not only era labels.\n- literal_traps_to_avoid: exactly 2-3 hard bans only (e.g. title illustration, musician portraits). Do not write a long anti-cliché essay.\n- artist_or_album_priors: up to 6 concrete place, era, light, crowd, or cultural priors useful for museum search, matched to this recording's energy (e.g. dense night interiors and syncopated urban geometry for groove-heavy remakes; open landscape for sparse folk)`,
+        content: `Track identity: ${JSON.stringify(track)}\n\nReturn exactly these JSON keys:\n- confidence: high|medium|low — high only if you know this specific recording (this artist/album take) beyond the title words\n- known_facts: up to 6 short facts about THIS recording or its performers you are reasonably sure about\n- uncertain: up to 6 gaps (arrangement, personnel, whether it is a remake, etc.)\n- sonic_and_thematic_reading: 2-4 sentences on rhythm feel, instrumentation/timbre, energy, setting, and themes for THIS take. If it may be a remake or cover, say how this version likely differs from the famous original. If confidence is low, lean on album/artist/genre priors and say so — still describe probable groove and energy, not only era labels.\n- literal_traps_to_avoid: exactly 2-3 hard bans only (e.g. musician portraits, album-cover restaging). Do not write a long anti-cliché essay. Literal title imagery is allowed when it also matches the recording's energy and setting — only ban it when it would be a shallow one-note gag.\n- artist_or_album_priors: up to 6 concrete place, era, light, crowd, or cultural priors useful for museum search, matched to this recording's energy (e.g. dense night interiors and syncopated urban geometry for groove-heavy remakes; open landscape for sparse folk)`,
       },
     ],
   });
@@ -93,7 +94,7 @@ async function createVisualPlan(client: OpenAI, track: CleanTrack, dossier: Song
       },
       {
         role: "user",
-        content: `Track identity: ${JSON.stringify(track)}\nSong dossier: ${JSON.stringify(dossier)}\n\n${lowConfidenceNote}\n\nReturn exactly these JSON keys:\n- semantic_anchors: 3-6 concepts grounded in the dossier's reading of THIS recording\n- sonic_character: 3-6 descriptors of space, rhythm, texture, or motion that match the stated energy\n- emotional_tone: 3-6 emotional qualities\n- formal_qualities: 3-6 visible compositional qualities that echo the music (density, syncopation, layering, openness, etc.)\n- cultural_context: up to 4 cautious associations\n- visual_direction: 3-6 requirements for room-scale television display\n- avoid: exactly 3-4 hard bans only — portraits, obvious title illustration, music notation/instruments as subject, weak decorative fillers. Do not expand the dossier's trap list.\n- mood: 3-6 adjectives\n- energy: low|medium|high — must match the dossier reading (groove-heavy, punchy, or danceable takes should be high or medium-high, never soft-default medium)\n- palette: 3-5 colors\n- visual_motifs: 4-8 concrete visible motifs museums can catalog, honest to energy (high energy: crowded night interiors, neon doorway, overlapping figures, bold geometric planes, urban signage color; low energy: open landscape, quiet interior, soft horizon)\n- art_movements: up to 3\n- museum_search_terms: exactly 10 retrieval-native museum-catalog queries of 1-4 common words each\n- curatorial_rationale: exactly 2 sentences grounded in the recording's feel\n\nSearch-term mix: 3 tight thematic subjects, 3 settings/atmospheres, 2 formal/light queries, 2 broader wildcards. Prefer concrete nouns museums index. Match energy — for high-energy urban/funk/soul-jazz prefer terms like night cafe, dance hall, neon interior, crowded street, geometric collage, bold color planes; for sparse music prefer open landscape terms. Procession, parade, courtyard, and similar communal public scenes remain valid when they fit the reading. At most one query may echo the track title. Do not use artist names, instruments, or music/audio words.`,
+        content: `Track identity: ${JSON.stringify(track)}\nSong dossier: ${JSON.stringify(dossier)}\n\n${lowConfidenceNote}\n\nReturn exactly these JSON keys:\n- semantic_anchors: 3-6 concepts grounded in the dossier's reading of THIS recording\n- sonic_character: 3-6 descriptors of space, rhythm, texture, or motion that match the stated energy\n- emotional_tone: 3-6 emotional qualities\n- formal_qualities: 3-6 visible compositional qualities that echo the music (density, syncopation, layering, openness, etc.)\n- cultural_context: up to 4 cautious associations\n- visual_direction: 3-6 requirements for room-scale television display\n- avoid: exactly 3-4 hard bans only — portraits, music notation/instruments as subject, weak decorative fillers. Do not expand the dossier's trap list. Do not ban literal title imagery; a night sky for "Stargazing" is welcome when it also fits the groove.\n- mood: 3-6 adjectives\n- energy: low|medium|high — must match the dossier reading (groove-heavy, punchy, or danceable takes should be high or medium-high, never soft-default medium)\n- palette: 3-5 colors\n- visual_motifs: 4-8 concrete visible motifs museums can catalog, honest to energy (high energy: crowded night interiors, neon doorway, overlapping figures, bold geometric planes, urban signage color; low energy: open landscape, quiet interior, soft horizon)\n- art_movements: up to 3\n- museum_search_terms: exactly 10 retrieval-native museum-catalog queries of 1-4 common words each\n- curatorial_rationale: exactly 2 sentences grounded in the recording's feel\n\nSearch-term mix: 3 tight thematic subjects, 3 settings/atmospheres, 2 formal/light queries, 2 broader wildcards. Prefer concrete nouns museums index. Match energy — for high-energy urban/funk/soul-jazz prefer terms like night cafe, dance hall, neon interior, crowded street, geometric collage, bold color planes; for sparse music prefer open landscape terms. Procession, parade, courtyard, and similar communal public scenes remain valid when they fit the reading. Up to two queries may echo the track title or its literal imagery when that imagery also fits the recording's mood (e.g. "night sky", "starry night" for a dreamy R&B track called Stargazing). Do not use artist names, instruments, or music/audio words.`,
       },
     ],
   });
@@ -248,6 +249,71 @@ async function searchChicago(term: string): Promise<Candidate[]> {
   });
 }
 
+type SmithsonianRow = {
+  id?: string;
+  title?: string;
+  content?: {
+    descriptiveNonRepeating?: {
+      record_ID?: string;
+      title?: { content?: string };
+      data_source?: string;
+      online_media?: { media?: Array<{ content?: string; type?: string; width?: number; height?: number }> };
+    };
+    freetext?: {
+      name?: Array<{ label?: string; content?: string }>;
+      date?: Array<{ label?: string; content?: string }>;
+      physicalDescription?: Array<{ label?: string; content?: string }>;
+      type?: Array<{ label?: string; content?: string }>;
+    };
+  };
+};
+
+function smithsonianText(values: Array<{ label?: string; content?: string }> | undefined) {
+  return values?.map((value) => value.content).filter(Boolean).join("; ") ?? "";
+}
+
+/** Smithsonian Open Access — strong photography/documentary archive. Requires SMITHSONIAN_API_KEY. */
+async function searchSmithsonian(term: string): Promise<Candidate[]> {
+  const apiKey = process.env.SMITHSONIAN_API_KEY;
+  if (!apiKey) return [];
+  const url = new URL(smithsonianApi);
+  url.searchParams.set("api_key", apiKey);
+  url.searchParams.set("q", term);
+  url.searchParams.set("rows", String(EXTERNAL_RESULTS_PER_TERM));
+  const response = await fetch(url, { signal: AbortSignal.timeout(8000) });
+  if (!response.ok) return [];
+  const data = await response.json() as { response?: { rows?: SmithsonianRow[] } };
+  return (data.response?.rows ?? []).flatMap((row) => {
+    const recordId = row.content?.descriptiveNonRepeating?.record_ID ?? row.id;
+    const media = row.content?.descriptiveNonRepeating?.online_media?.media?.find((item) => item.type === "Images" && item.content);
+    if (!recordId || !media?.content) return [];
+    const title = row.content?.descriptiveNonRepeating?.title?.content ?? row.title ?? "Untitled";
+    const artist = smithsonianText(row.content?.freetext?.name) || "Unknown artist";
+    const date = smithsonianText(row.content?.freetext?.date) || "Date unknown";
+    const medium = smithsonianText(row.content?.freetext?.physicalDescription);
+    const objectName = smithsonianText(row.content?.freetext?.type);
+    const museum = row.content?.descriptiveNonRepeating?.data_source ?? "Smithsonian";
+    const width = Number(media.width);
+    const height = Number(media.height);
+    return [{
+      id: `smithsonian:${recordId}`,
+      source: "smithsonian" as const,
+      sourceId: String(recordId),
+      sourceUrl: `https://www.si.edu/object/${encodeURIComponent(String(recordId))}`,
+      rights: "CC0" as const,
+      title,
+      artist,
+      date,
+      museum,
+      image: media.content,
+      medium,
+      objectName,
+      probeImage: media.content,
+      aspectRatio: width > 0 && height > 0 ? width / height : undefined,
+    }];
+  });
+}
+
 function interleaveCandidates(resultSets: Candidate[][], limit: number) {
   const candidates: Candidate[] = [];
   const seen = new Set<string>();
@@ -380,7 +446,7 @@ function uniqueArtworks(candidates: Candidate[]) {
 }
 
 function sourceCounts(candidates: Candidate[]) {
-  return Object.fromEntries(["met", "cleveland", "artic"].map((source) => [source, candidates.filter((candidate) => candidate.source === source).length]));
+  return Object.fromEntries(["met", "cleveland", "artic", "smithsonian"].map((source) => [source, candidates.filter((candidate) => candidate.source === source).length]));
 }
 
 async function withCuratorImage(candidate: Candidate): Promise<CuratorCandidate | null> {
@@ -426,7 +492,7 @@ async function chooseSemifinalists(client: OpenAI, track: CleanTrack, brief: Vis
       {
         role: "user",
         content: [
-          { type: "input_text", text: `Track: ${JSON.stringify(track)}\nSong dossier confidence: ${brief.confidence}\nDossier reading: ${brief.dossier.sonic_and_thematic_reading}\nVisual brief: ${JSON.stringify({ semantic_anchors: brief.semantic_anchors, sonic_character: brief.sonic_character, emotional_tone: brief.emotional_tone, visual_motifs: brief.visual_motifs, mood: brief.mood, energy: brief.energy, avoid: brief.avoid })}\n\nChoose the strongest ${SEMIFINALISTS_PER_BATCH} distinct candidates that fit this recording's energy and reading. A successful pairing needs at least one semantic_anchors connection, one emotional or sonic connection, and one compelling visual reason. Judge the actual images, not title coincidence. Prefer strong room-scale compositions when they also fit the brief. Return exactly {"candidateIds":["source:id","source:id"]}, ranked best first.` },
+          { type: "input_text", text: `Track: ${JSON.stringify(track)}\nSong dossier confidence: ${brief.confidence}\nDossier reading: ${brief.dossier.sonic_and_thematic_reading}\nVisual brief: ${JSON.stringify({ semantic_anchors: brief.semantic_anchors, sonic_character: brief.sonic_character, emotional_tone: brief.emotional_tone, visual_motifs: brief.visual_motifs, mood: brief.mood, energy: brief.energy, avoid: brief.avoid })}\n\nChoose the strongest ${SEMIFINALISTS_PER_BATCH} distinct candidates that fit this recording's energy and reading. A successful pairing needs at least one semantic_anchors connection, one emotional or sonic connection, and one compelling visual reason. Judge the actual images, not title coincidence — but do not reject a work only because it literally matches the title; literal imagery is a valid connection when it also carries the right energy and setting. Prefer strong room-scale compositions when they also fit the brief. Return exactly {"candidateIds":["source:id","source:id"]}, ranked best first.` },
           ...candidates.flatMap((candidate) => candidateContent(candidate, "low")),
         ],
       },
@@ -451,7 +517,7 @@ async function chooseCandidate(client: OpenAI, track: CleanTrack, brief: VisualB
       {
         role: "user",
         content: [
-          { type: "input_text", text: `Track: ${JSON.stringify(track)}\nSong dossier: ${JSON.stringify(brief.dossier)}\nVisual brief: ${JSON.stringify(brief)}\n\nScore comparatively using: brief fidelity and thematic resonance 35%, sonic and emotional resonance (including energy match) 30%, visual strength on television 15%, interpretive originality 10%, historical or cultural connection 5%, and provenance confidence 5%. Apply explicit penalties: energy mismatch (e.g. serene/historical decoration for a groove-heavy or high-energy reading) -30; gorgeous but off-brief -30; generic or decorative -20; obvious title illustration without deeper connection -20; artist or musician portrait -25; weak television composition -15; rationale requiring invented facts -30. A successful winner must name which semantic_anchors or motifs it supports, plus an emotional or sonic connection and a visual reason.\n\nReturn exactly {"candidateId":"source:id","alternativeIds":["source:id","source:id"],"matchedAnchors":["anchor","anchor"],"rationale":"two concise sentences explaining visible and interpretive connections without invented facts"}.` },
+          { type: "input_text", text: `Track: ${JSON.stringify(track)}\nSong dossier: ${JSON.stringify(brief.dossier)}\nVisual brief: ${JSON.stringify(brief)}\n\nScore comparatively using: brief fidelity and thematic resonance 35%, sonic and emotional resonance (including energy match) 30%, visual strength on television 15%, interpretive originality 10%, historical or cultural connection 5%, and provenance confidence 5%. Apply explicit penalties: energy mismatch (e.g. serene/historical decoration for a groove-heavy or high-energy reading) -30; gorgeous but off-brief -30; generic or decorative -20; shallow title illustration that ignores the recording's energy or setting -20; artist or musician portrait -25; weak television composition -15; rationale requiring invented facts -30. A successful winner must name which semantic_anchors or motifs it supports, plus an emotional or sonic connection and a visual reason. Literal title imagery is not a penalty when it also matches the mood and energy.\n\nReturn exactly {"candidateId":"source:id","alternativeIds":["source:id","source:id"],"matchedAnchors":["anchor","anchor"],"rationale":"two concise sentences explaining visible and interpretive connections without invented facts"}.` },
           ...candidates.flatMap((candidate) => candidateContent(candidate, "high")),
         ],
       },
@@ -492,17 +558,19 @@ export async function POST(request: Request) {
         return [];
       })),
     );
-    const [metResultSets, clevelandResultSets, chicagoResultSets] = await Promise.all([
+    const [metResultSets, clevelandResultSets, chicagoResultSets, smithsonianResultSets] = await Promise.all([
       safeTerms(searchMet),
       safeTerms(searchCleveland),
       safeTerms(searchChicago),
+      safeTerms(searchSmithsonian),
     ]);
     const ids = interleaveUniqueIds(metResultSets, MAX_OBJECTS_TO_RESOLVE);
     const resolved = await resolveCandidates(ids);
     const metCandidates = resolved.filter((candidate): candidate is Candidate => candidate !== null);
     const clevelandCandidates = interleaveCandidates(clevelandResultSets, MAX_OBJECTS_TO_RESOLVE);
     const chicagoCandidates = interleaveCandidates(chicagoResultSets, MAX_OBJECTS_TO_RESOLVE);
-    const fineArt = uniqueArtworks([...metCandidates, ...clevelandCandidates, ...chicagoCandidates].filter(isTwoDimensionalFineArt));
+    const smithsonianCandidates = interleaveCandidates(smithsonianResultSets, MAX_OBJECTS_TO_RESOLVE);
+    const fineArt = uniqueArtworks([...metCandidates, ...clevelandCandidates, ...chicagoCandidates, ...smithsonianCandidates].filter(isTwoDimensionalFineArt));
     const probePool = balanceBySource(fineArt, MAX_FINE_ART_TO_PROBE);
     const withImages = (await Promise.all(probePool.map(withDisplayableImage)))
       .filter((candidate): candidate is Candidate => candidate !== null);
@@ -517,8 +585,9 @@ export async function POST(request: Request) {
         met: metResultSets.map((result) => result.length),
         cleveland: clevelandResultSets.map((result) => result.length),
         artic: chicagoResultSets.map((result) => result.length),
+        smithsonian: smithsonianResultSets.map((result) => result.length),
       },
-      resolved: sourceCounts([...metCandidates, ...clevelandCandidates, ...chicagoCandidates]),
+      resolved: sourceCounts([...metCandidates, ...clevelandCandidates, ...chicagoCandidates, ...smithsonianCandidates]),
       fineArt: sourceCounts(fineArt),
       probed: sourceCounts(probePool),
       displayable: sourceCounts(withImages),
