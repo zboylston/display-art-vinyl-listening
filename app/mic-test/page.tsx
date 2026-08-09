@@ -32,6 +32,8 @@ export default function MicTestPage() {
   const [capturing, setCapturing] = useState(false);
   const [identifyResult, setIdentifyResult] = useState("");
   const [identifying, setIdentifying] = useState(false);
+  const [constraintMode, setConstraintMode] = useState<"app" | "default">("app");
+  const [trackEvents, setTrackEvents] = useState<string[]>([]);
 
   const streamRef = useRef<MediaStream | null>(null);
   const contextRef = useRef<AudioContext | null>(null);
@@ -74,24 +76,37 @@ export default function MicTestPage() {
       return;
     }
     try {
-      // Same constraints as the main app's listen mode — the point is to see
-      // what this browser actually applies vs what we ask for.
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { deviceId: deviceId ? { exact: deviceId } : undefined, echoCancellation: false, noiseSuppression: false, autoGainControl: true, channelCount: 1, sampleRate: 48_000 },
-      });
+      // "app" uses the main app's exact constraints; "default" asks for nothing,
+      // which some TV browsers handle better.
+      const audio: MediaTrackConstraints | boolean = constraintMode === "app"
+        ? { deviceId: deviceId ? { exact: deviceId } : undefined, echoCancellation: false, noiseSuppression: false, autoGainControl: true, channelCount: 1, sampleRate: 48_000 }
+        : deviceId ? { deviceId: { exact: deviceId } } : true;
+      const stream = await navigator.mediaDevices.getUserMedia({ audio });
       streamRef.current = stream;
       const track = stream.getAudioTracks()[0];
       const settings = track?.getSettings() ?? {};
       const context = new AudioContext();
       await context.resume();
       contextRef.current = context;
+
+      const logTrackEvent = (event: string) => setTrackEvents((events) => [...events.slice(-7), `${new Date().toLocaleTimeString()} ${event}`]);
+      if (track) {
+        logTrackEvent(`track readyState=${track.readyState} muted=${track.muted} enabled=${track.enabled}`);
+        track.onmute = () => logTrackEvent("track MUTED (OS stopped delivering audio)");
+        track.onunmute = () => logTrackEvent("track unmuted (audio flowing)");
+        track.onended = () => logTrackEvent("track ENDED");
+      }
+      const devices = await navigator.mediaDevices.enumerateDevices().catch(() => []);
+      const audioInputCount = devices.filter((device) => device.kind === "audioinput").length;
       setSettingsLines([
         `label: ${track?.label ?? "unknown"}`,
-        `sampleRate: context ${context.sampleRate}Hz · track ${settings.sampleRate ?? "?"}Hz (asked 48000)`,
-        `channelCount: ${settings.channelCount ?? "?"} (asked 1)`,
-        `echoCancellation: ${String(settings.echoCancellation)} (asked false)`,
-        `noiseSuppression: ${String(settings.noiseSuppression)} (asked false)`,
-        `autoGainControl: ${String(settings.autoGainControl)} (asked true)`,
+        `track state: readyState=${track?.readyState ?? "?"} muted=${String(track?.muted)} (muted=true means the OS is sending silence)`,
+        `audio inputs visible: ${audioInputCount}`,
+        `sampleRate: context ${context.sampleRate}Hz · track ${settings.sampleRate ?? "?"}Hz${constraintMode === "app" ? " (asked 48000)" : ""}`,
+        `channelCount: ${settings.channelCount ?? "?"}${constraintMode === "app" ? " (asked 1)" : ""}`,
+        `echoCancellation: ${String(settings.echoCancellation)}${constraintMode === "app" ? " (asked false)" : ""}`,
+        `noiseSuppression: ${String(settings.noiseSuppression)}${constraintMode === "app" ? " (asked false)" : ""}`,
+        `autoGainControl: ${String(settings.autoGainControl)}${constraintMode === "app" ? " (asked true)" : ""}`,
         `ua: ${navigator.userAgent}`,
       ]);
 
@@ -137,7 +152,16 @@ export default function MicTestPage() {
         ? "Listening. Play music — the meter should move clearly. Then capture 10s."
         : "Listening (meter only — no worklet on this browser).");
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Microphone access failed.");
+      const name = error instanceof DOMException ? error.name : "";
+      if (name === "NotAllowedError" || name === "PermissionDeniedError") {
+        setStatus("Mic permission denied — check the TV browser's site permissions.");
+      } else if (name === "NotFoundError" || name === "DevicesNotFoundError") {
+        setStatus("No microphone found — this TV browser may not expose a mic to web pages.");
+      } else if (name === "OverconstrainedError") {
+        setStatus("Constraints rejected by this browser — switch to 'default constraints' and retry.");
+      } else {
+        setStatus(error instanceof Error ? error.message : "Microphone access failed.");
+      }
     }
   }
 
@@ -236,6 +260,14 @@ export default function MicTestPage() {
           <option value="">Default microphone</option>
           {inputs.map((input) => <option key={input.deviceId} value={input.deviceId}>{input.label}</option>)}
         </select>
+        <select
+          value={constraintMode}
+          onChange={(event) => setConstraintMode(event.target.value as "app" | "default")}
+          style={{ background: "#26221c", color: "inherit", border: "1px solid rgba(255,255,255,.25)", borderRadius: 8, padding: ".7rem 1rem", font: "inherit" }}
+        >
+          <option value="app">App constraints (mono 48k, no EC/NS)</option>
+          <option value="default">Default constraints (browser chooses)</option>
+        </select>
         <button type="button" onClick={() => void startMic()} style={{ border: "1px solid currentColor", background: "transparent", color: "inherit", borderRadius: 100, padding: ".7rem 1.4rem", font: "inherit", cursor: "pointer", margin: 0 }}>
           {listening ? "Restart mic" : "Start mic"}
         </button>
@@ -273,6 +305,11 @@ export default function MicTestPage() {
           <pre style={{ margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-word", font: "500 .8rem/1.6 ui-monospace, Menlo, monospace", opacity: .9 }}>
             {settingsLines.join("\n")}
           </pre>
+          {trackEvents.length > 0 && (
+            <pre style={{ margin: ".6rem 0 0", whiteSpace: "pre-wrap", font: "500 .8rem/1.6 ui-monospace, Menlo, monospace", color: "#c99776" }}>
+              {trackEvents.join("\n")}
+            </pre>
+          )}
         </section>
       )}
 
