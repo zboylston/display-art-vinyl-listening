@@ -8,13 +8,13 @@ import {
   VINYL_SUSTAINED_SILENCE_PARK_MS,
   advanceVerificationAt,
   armVinylGapLatch,
-  boundaryIdentifyCaptureStartAt,
   canPredictiveAdvance,
   endConfirmCaptureMs,
   isVinylDetectorStateAudible,
   isVinylGapLatchExpired,
   rollbackAdvanceIndex,
   shouldAdvanceOnGapResume,
+  shouldAdvanceOnPrediction,
   shouldArmEndConfirm,
   shouldFireEndConfirm,
   shouldParkVinylOnSilence,
@@ -57,6 +57,19 @@ describe("vinyl advance verification", () => {
     expect(shouldRollbackUnverifiedAdvance({ pendingVerify: false, outcome: "none" })).toBe(false);
   });
 
+  it("never rolls back a visible prediction advance on an inconclusive verify", () => {
+    expect(shouldRollbackUnverifiedAdvance({
+      pendingVerify: true,
+      outcome: "none",
+      advanceReason: "prediction",
+    })).toBe(false);
+    expect(shouldRollbackUnverifiedAdvance({
+      pendingVerify: true,
+      outcome: "error",
+      advanceReason: "prediction",
+    })).toBe(false);
+  });
+
   it("restores the previous album index after a failed verify", () => {
     expect(rollbackAdvanceIndex(3)).toBe(2);
     expect(rollbackAdvanceIndex(1)).toBe(0);
@@ -73,6 +86,37 @@ describe("vinyl sustained silence", () => {
 });
 
 describe("predictive advance gates", () => {
+  it("advances visibly at the predicted boundary without waiting for recognition", () => {
+    expect(shouldAdvanceOnPrediction({
+      pastBoundary: true,
+      parked: false,
+      pendingVerify: false,
+      advanceInFlight: false,
+      endConfirmInFlight: false,
+    })).toBe(true);
+    expect(shouldAdvanceOnPrediction({
+      pastBoundary: false,
+      parked: false,
+      pendingVerify: false,
+      advanceInFlight: false,
+      endConfirmInFlight: false,
+    })).toBe(false);
+    expect(shouldAdvanceOnPrediction({
+      pastBoundary: true,
+      parked: false,
+      pendingVerify: true,
+      advanceInFlight: false,
+      endConfirmInFlight: false,
+    })).toBe(false);
+    expect(shouldAdvanceOnPrediction({
+      pastBoundary: true,
+      parked: true,
+      pendingVerify: false,
+      advanceInFlight: false,
+      endConfirmInFlight: false,
+    })).toBe(false);
+  });
+
   it("blocks timer/spectral advances once silence has armed a gap or parked the album", () => {
     expect(canPredictiveAdvance({ parked: false, paused: false, gapPending: false, detectorState: "stable", requireStable: true })).toBe(true);
     expect(canPredictiveAdvance({ parked: false, paused: false, gapPending: true, detectorState: "stable", requireStable: true })).toBe(false);
@@ -92,29 +136,6 @@ describe("predictive advance gates", () => {
 });
 
 describe("end-confirm arming", () => {
-  it("anchors an early-armed capture clock at the predicted boundary", () => {
-    const boundaryAt = 100_000;
-    const armedAt = boundaryIdentifyCaptureStartAt(
-      boundaryAt - 3_000,
-      3_000,
-    );
-    expect(armedAt).toBe(boundaryAt);
-    expect(shouldFireEndConfirm({
-      endConfirmPending: true,
-      endConfirmArmedAt: armedAt,
-      now: boundaryAt + VINYL_END_CONFIRM_GAPLESS_CAPTURE_MS - 1,
-      audible: true,
-      gapless: true,
-    })).toBe(false);
-    expect(shouldFireEndConfirm({
-      endConfirmPending: true,
-      endConfirmArmedAt: armedAt,
-      now: boundaryAt + VINYL_END_CONFIRM_GAPLESS_CAPTURE_MS,
-      audible: true,
-      gapless: true,
-    })).toBe(true);
-  });
-
   it("keeps boundary capture audible through recognition cooldown and warming", () => {
     expect(isVinylDetectorStateAudible("stable")).toBe(true);
     expect(isVinylDetectorStateAudible("cooldown")).toBe(true);

@@ -13,16 +13,15 @@ import {
 import { canonicalTrackKey, INITIAL_DISCOVERY_CAPTURE_MS, noMatchRetryDelay, RecognitionGate, textTrackKey } from "./lib/recognition";
 import { parseRecentArtworkIds, pushRecentArtworkId, shouldRefreshCachedArtwork } from "./lib/recent-artwork";
 import {
-  VINYL_BOUNDARY_IDENTIFY_LEAD_MS,
   VINYL_END_CONFIRM_GAPLESS_SNAPSHOT_SECONDS,
   VINYL_VERIFY_SNAPSHOT_SECONDS,
   advanceVerificationAt,
   armVinylGapLatch,
-  boundaryIdentifyCaptureStartAt,
   isVinylDetectorStateAudible,
   isVinylGapLatchExpired,
   rollbackAdvanceIndex,
   shouldAdvanceOnGapResume,
+  shouldAdvanceOnPrediction,
   shouldArmEndConfirm,
   shouldFireEndConfirm,
   shouldParkVinylOnSilence,
@@ -157,7 +156,7 @@ export default function Home() {
   const vinylEndConfirmInFlightRef = useRef(false);
   /** True when end-confirm armed while music was already playing (gapless). */
   const vinylEndConfirmGaplessRef = useRef(false);
-  const vinylLastAdvanceReasonRef = useRef<"gap" | "none">("none");
+  const vinylLastAdvanceReasonRef = useRef<"gap" | "prediction" | "none">("none");
   const vinylPreloadRef = useRef<{ key: string; promise: Promise<Artwork> } | null>(null);
   const vinylMidpointHeartbeatAtRef = useRef(0);
   const vinylPreTransitionHeartbeatAtRef = useRef(0);
@@ -426,10 +425,18 @@ export default function Home() {
   /** Freeze the predicted sequence until real music returns — do not walk the album index. */
   function parkVinylPlayback() {
     // If we already guessed the next song and silence arrives before verify,
-    // undo the guess instead of freezing on the wrong track.
-    if (vinylAdvancePendingVerifyRef.current) {
+    // undo only a gap-driven guess. A timer prediction already changed the
+    // visible track and must never snap backward because verification was late.
+    if (
+      vinylAdvancePendingVerifyRef.current
+      && vinylLastAdvanceReasonRef.current === "gap"
+    ) {
       rollbackUnverifiedVinylAdvance();
       return;
+    }
+    if (vinylLastAdvanceReasonRef.current === "prediction") {
+      vinylAdvancePendingVerifyRef.current = false;
+      vinylLastAdvanceReasonRef.current = "none";
     }
     vinylGapPendingRef.current = false;
     vinylGapLatchRef.current = null;
@@ -565,10 +572,9 @@ export default function Home() {
     });
   }
 
-  async function advanceVinyl(reason: "gap") {
+  async function advanceVinyl(reason: "gap" | "prediction") {
     const album = vinylAlbumRef.current;
     if (!album || vinylAdvanceInFlightRef.current) return false;
-    if (!silenceFirstAllowsBlindBoundaryAdvance() && reason !== "gap") return false;
     const nextIndex = album.index + 1;
     const next = album.tracks[nextIndex];
     if (!next) {
@@ -597,9 +603,10 @@ export default function Home() {
     changeRecognitionPhase("matched");
     if (phaseTimerRef.current) window.clearTimeout(phaseTimerRef.current);
     phaseTimerRef.current = window.setTimeout(() => changeRecognitionPhase("listening"), 2_800);
-    // Gap advance must be confirmed with a post-gap clip (~10s in the ring).
+    // The visible handoff happens now. Recognition verifies/re-anchors later;
+    // a miss must never block or undo a prediction-driven transition.
     vinylAdvancePendingVerifyRef.current = true;
-    vinylLastAdvanceReasonRef.current = "gap";
+    vinylLastAdvanceReasonRef.current = reason;
     nextFallbackAtRef.current = advanceVerificationAt(Date.now());
     nextFallbackReasonRef.current = "expected-ending";
     setAudioDebug((debug) => ({ ...debug, reason: `advance:${reason}` }));
@@ -730,19 +737,41 @@ export default function Home() {
           scheduleVinylHeartbeats();
         }
       }
-    } else if (shouldRollbackUnverifiedAdvance({ pendingVerify: vinylAdvancePendingVerifyRef.current, outcome })) {
+    } else if (shouldRollbackUnverifiedAdvance({
+      pendingVerify: vinylAdvancePendingVerifyRef.current,
+      outcome,
+      advanceReason: vinylLastAdvanceReasonRef.current,
+    })) {
       rollbackUnverifiedVinylAdvance();
       consecutiveNoMatchRef.current += 1;
     } else if (outcome === "none" || outcome === "error") {
+      // Prediction already changed the visible track. A failed background check
+      // is inconclusive, not grounds to revert or block the next boundary.
+      if (
+        vinylAdvancePendingVerifyRef.current
+        && vinylLastAdvanceReasonRef.current === "prediction"
+      ) {
+        vinylAdvancePendingVerifyRef.current = false;
+        vinylLastAdvanceReasonRef.current = "none";
+      }
       consecutiveNoMatchRef.current += 1;
       const retryDelay = noMatchRetryDelay(Boolean(lastTrackKeyRef.current), consecutiveNoMatchRef.current, SAFETY_CHECK_MS);
       nextFallbackAtRef.current = now + retryDelay;
       nextFallbackReasonRef.current = "safety-check";
     } else {
       consecutiveNoMatchRef.current = 0;
-      // Same-song confirm or a fresh match clears the pending advance verify.
-      vinylAdvancePendingVerifyRef.current = false;
-      vinylLastAdvanceReasonRef.current = "none";
+      // A heartbeat started before the timer advance can finish afterward and
+      // hear the old track. Keep the prediction verify pending until its own
+      // expected-ending check runs.
+      const stalePreAdvanceCheck = (
+        vinylAdvancePendingVerifyRef.current
+        && vinylLastAdvanceReasonRef.current === "prediction"
+        && reason !== "expected-ending"
+      );
+      if (!stalePreAdvanceCheck) {
+        vinylAdvancePendingVerifyRef.current = false;
+        vinylLastAdvanceReasonRef.current = "none";
+      }
     }
     setAudioDebug((debug) => ({ ...debug, reason: `${reason}:${outcome}` }));
     if (phaseTimerRef.current) window.clearTimeout(phaseTimerRef.current);
@@ -780,6 +809,12 @@ export default function Home() {
     const now = Date.now();
     if (!listeningRef.current || !recognitionGateRef.current.tryStart(now)) {
       if (reason === "end-confirm") vinylEndConfirmInFlightRef.current = false;
+      if (reason === "expected-ending" && vinylAdvancePendingVerifyRef.current) {
+        // A pre-transition heartbeat may still own the recognition gate. Retry
+        // promptly instead of losing verification for the next two minutes.
+        nextFallbackAtRef.current = now + 2_000;
+        nextFallbackReasonRef.current = "expected-ending";
+      }
       return;
     }
     lastCheckAtRef.current = now;
@@ -954,13 +989,24 @@ export default function Home() {
         if (vinylMode && vinylAlbumRef.current && vinylBoundaryAtRef.current > 0) {
           const pastBoundary = wallNow >= vinylBoundaryAtRef.current;
           const audible = isVinylDetectorStateAudible(update.state);
-          // Prediction-first: within the lead window before the predicted end and
-          // music is playing, arm the gapless identify now so the capture straddles
-          // the transition. The gap path stays as a fallback for real silence.
-          const withinIdentifyLead = audible && !vinylGapPendingRef.current
-            && wallNow >= vinylBoundaryAtRef.current - VINYL_BOUNDARY_IDENTIFY_LEAD_MS;
 
           if (
+            shouldAdvanceOnPrediction({
+              pastBoundary,
+              parked: vinylParkedRef.current,
+              pendingVerify: vinylAdvancePendingVerifyRef.current,
+              advanceInFlight: vinylAdvanceInFlightRef.current,
+              endConfirmInFlight: vinylEndConfirmInFlightRef.current,
+            })
+          ) {
+            // The album sequence is already known: change the visible track at
+            // zero, including during a short inter-track silence. Recognition
+            // verifies in the background and cannot block or undo the handoff.
+            void advanceVinyl("prediction");
+            // If the record is truly stopped rather than between tracks, retain
+            // a silence clock so sustained-silence parking still activates.
+            if (!audible) vinylPauseAtRef.current = wallNow;
+          } else if (
             shouldTimeoutEndConfirm({
               endConfirmPending: vinylEndConfirmPendingRef.current,
               endConfirmArmedAt: vinylEndConfirmArmedAtRef.current,
@@ -984,19 +1030,6 @@ export default function Home() {
             vinylEndConfirmInFlightRef.current = true;
             setAudioDebug((debug) => ({ ...debug, reason: "end-confirm" }));
             void requestRecognition("end-confirm");
-          } else if (
-            withinIdentifyLead
-            && !vinylParkedRef.current
-            && !vinylAdvancePendingVerifyRef.current
-            && !vinylEndConfirmPendingRef.current
-          ) {
-            // Arm early, but anchor the capture clock at the predicted boundary so
-            // it fires ~4s afterward. The 5s snapshot is therefore mostly the next
-            // track (boundary-1s … boundary+4s), not the old tail.
-            vinylEndConfirmPendingRef.current = true;
-            vinylEndConfirmArmedAtRef.current = boundaryIdentifyCaptureStartAt(wallNow);
-            vinylEndConfirmGaplessRef.current = true;
-            setAudioDebug((debug) => ({ ...debug, reason: "end-capturing:lead" }));
           } else if (
             shouldArmEndConfirm({
               pastBoundary,

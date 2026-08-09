@@ -11,10 +11,10 @@ export const VINYL_SUSTAINED_SILENCE_PARK_MS = 20_000;
 export const VINYL_ADVANCE_VERIFY_MS = 8_000;
 /**
  * Snapshot length for post-advance verify and post-silence end-confirm. Keep it
- * short — a brief clip taken once the new song is playing cannot match the old
- * track, unlike a long window that spans the gap.
+ * long enough for room-audio fingerprinting; stale previous-track matches are
+ * ignored by the prediction verifier instead of shrinking this sample.
  */
-export const VINYL_VERIFY_SNAPSHOT_SECONDS = 5;
+export const VINYL_VERIFY_SNAPSHOT_SECONDS = 10;
 /**
  * Gapless (already audible at the boundary): wait this long past the predicted
  * end before identifying — long enough for a mostly-new-track ring window,
@@ -25,24 +25,12 @@ export const VINYL_END_CONFIRM_GAPLESS_CAPTURE_MS = 4_000;
 export const VINYL_END_CONFIRM_CAPTURE_MS = 10_000;
 /** Snapshot length when identifying a gapless end-confirm (favor post-boundary audio). */
 export const VINYL_END_CONFIRM_GAPLESS_SNAPSHOT_SECONDS = 5;
-/**
- * Prediction-first: arm the boundary identify this early, so the 5s capture
- * window straddles the predicted transition (a little old-track tail, mostly
- * new track) and the result lands right as the next song starts — instead of
- * arming at the boundary and identifying ~7s late.
- */
-export const VINYL_BOUNDARY_IDENTIFY_LEAD_MS = 3_000;
 /** How long to wait for sound after the end timer before parking. */
 export const VINYL_END_CONFIRM_TIMEOUT_MS = 15_000;
 
 /** Capture window for end-confirm: shorter when music never went silent (gapless). */
 export function endConfirmCaptureMs(gapless: boolean) {
   return gapless ? VINYL_END_CONFIRM_GAPLESS_CAPTURE_MS : VINYL_END_CONFIRM_CAPTURE_MS;
-}
-
-/** Start the gapless capture clock at the predicted boundary, even when armed early. */
-export function boundaryIdentifyCaptureStartAt(now: number, leadMs = VINYL_BOUNDARY_IDENTIFY_LEAD_MS) {
-  return now + leadMs;
 }
 
 /**
@@ -81,6 +69,23 @@ export function advanceVerificationAt(now: number, verifyMs = VINYL_ADVANCE_VERI
  */
 export function shouldAdvanceOnGapResume(gapPending: boolean, event: string | null) {
   return gapPending && event === "music-resumed";
+}
+
+/** The album timer owns the visible handoff; recognition is non-blocking correction. */
+export function shouldAdvanceOnPrediction(input: {
+  pastBoundary: boolean;
+  parked: boolean;
+  pendingVerify: boolean;
+  advanceInFlight: boolean;
+  endConfirmInFlight: boolean;
+}) {
+  return (
+    input.pastBoundary
+    && !input.parked
+    && !input.pendingVerify
+    && !input.advanceInFlight
+    && !input.endConfirmInFlight
+  );
 }
 
 /**
@@ -160,8 +165,13 @@ export function shouldTimeoutEndConfirm(input: {
 export function shouldRollbackUnverifiedAdvance(input: {
   pendingVerify: boolean;
   outcome: "match" | "same" | "none" | "error";
+  advanceReason?: "gap" | "prediction" | "none";
 }) {
-  return input.pendingVerify && (input.outcome === "none" || input.outcome === "error");
+  return (
+    input.pendingVerify
+    && input.advanceReason !== "prediction"
+    && (input.outcome === "none" || input.outcome === "error")
+  );
 }
 
 /** Index to restore after a failed advance verify; null if there is nothing to roll back to. */
