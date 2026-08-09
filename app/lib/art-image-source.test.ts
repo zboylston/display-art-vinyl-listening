@@ -6,6 +6,7 @@ describe("artworkImageRequest", () => {
     "https://images.metmuseum.org/CRDImages/ep/original/DP-19486-001.jpg",
     "https://openaccess-cdn.clevelandart.org/1972.47/1972.47_web.jpg",
     "https://www.artic.edu/iiif/2/50034c7f-ce51-00f1-430e-a6f7efc233fc/full/1686,/0/default.jpg",
+    "https://ids.si.edu/ids/deliveryService?id=SG-2009-2397_A_BR",
   ])("allows a known museum display image: %s", (source) => {
     expect(artworkImageRequest(source)?.url.toString()).toBe(source);
   });
