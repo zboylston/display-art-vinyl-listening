@@ -1,6 +1,6 @@
 # Needle & Frame
 
-Artwork curation uses a landscape-first, museum-verified comparative funnel. A nuanced visual brief and anti-brief generate ten diversified searches across the Met, Cleveland Museum of Art, and Art Institute of Chicago. Up to eighteen actual candidate images are judged in comparative semifinals; the six finalists are then scored for emotional and thematic resonance, television-scale composition, originality, cultural connection, provenance, and explicit cliché penalties. The API response includes the winner and two alternatives.
+Artwork curation uses a landscape-first, museum-verified comparative funnel. A nuanced visual brief and anti-brief generate ten diversified searches across the Met, Cleveland Museum of Art, Art Institute of Chicago, and Smithsonian. Up to eighteen actual candidate images are judged in comparative semifinals; the six finalists are then scored for emotional and thematic resonance, energy and valence fidelity, television-scale composition, originality, cultural connection, provenance, and explicit cliché penalties. The API response includes the winner and two alternatives.
 
 An art-first television experience for music listening.
 
@@ -45,12 +45,21 @@ Set `USE_AUDIO_CHANGE_DETECTOR` to `false` in `app/page.tsx` to roll back to a 3
 
 The curation funnel measures each verified image before model selection. If any landscape work (aspect ratio `1.12` or wider) is available, portrait and square candidates are removed from the selection pool. Square, unknown-dimension, and portrait works are used only as progressively weaker fallbacks when no verified landscape candidate exists. Landscape candidates closest to 16:9 are presented to the curator first.
 
+## Emotional temperature
+
+Energy alone cannot tell a lullaby from a dirge: both are low. The brief therefore carries a `valence` (`tender`, `warm`, `neutral`, `melancholy`, or `ominous`) alongside `energy`, and the two are judged as independent axes.
+
+Valence is enforced with a measurement rather than only a prompt. Every curator thumbnail is decoded to a 48-pixel copy and averaged into a luminance, saturation, and warmth reading in `app/lib/art-tone.ts`. A dark, near-monochrome image against a tender or warm brief is a hard conflict and is dropped before the curator sees it, including when it arrived through the literal title lane; a single-axis clash is soft and is passed to the model as a stated fact. Hard conflicts return only when fewer than six aligned candidates survive retrieval, so the pool can never be starved. The final rubric adds a matching valence-mismatch penalty and judges television composition relative to the brief, so a quiet warm work counts as strong for a gentle song instead of merely decorative.
+
+`[curate] visual brief`, `[curate] candidate funnel`, and `[curate] selection` log the chosen valence, any demoted works, and the winner's measured tone.
+
 ## Artwork sources
 
-Curation searches three open-access museum collections concurrently:
+Curation searches four open-access museum collections concurrently:
 
 - The Metropolitan Museum of Art
 - Cleveland Museum of Art
 - Art Institute of Chicago
+- Smithsonian Institution (requires `SMITHSONIAN_API_KEY`)
 
 Only works explicitly marked public domain or CC0 are admitted. Provider records are normalized into one candidate shape, duplicate artist/title records are removed, and candidates are round-robin balanced by museum before visual selection so a larger collection cannot crowd out the others. Cleveland and Chicago supply image dimensions directly; final curator thumbnails are fetched server-side and sent as small embedded images so museum image-host restrictions do not break selection. The API response retains the museum source, collection record URL, rights label, and measured aspect ratio.

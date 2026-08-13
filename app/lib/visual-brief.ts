@@ -16,6 +16,12 @@ export type SongDossier = {
   artist_or_album_priors: string[];
 };
 
+/**
+ * Emotional temperature, kept separate from energy because both a lullaby and a
+ * funeral march read as low energy while needing opposite pictures.
+ */
+export type Valence = "tender" | "warm" | "neutral" | "melancholy" | "ominous";
+
 export type VisualBrief = {
   confidence: SongDossier["confidence"];
   semantic_anchors: string[];
@@ -27,6 +33,7 @@ export type VisualBrief = {
   avoid: string[];
   mood: string[];
   energy: "low" | "medium" | "high";
+  valence: Valence;
   palette: string[];
   visual_motifs: string[];
   art_movements: string[];
@@ -38,6 +45,7 @@ export type VisualBrief = {
 };
 
 const MUSIC_SEARCH_WORDS = /\b(song|songs|music|musical|melody|lyric|lyrics|album|track|tracks|band|singer|guitar|piano|drums|bass|violin|orchestra|tempo|rhythm|beat|chorus|verse|ballad|concert|vinyl|record|audio|soundtrack|musician|playlist)\b/i;
+const VALENCES: Valence[] = ["tender", "warm", "neutral", "melancholy", "ominous"];
 
 function normalize(value: string) {
   return value.normalize("NFKD").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
@@ -161,6 +169,7 @@ export function normalizeBrief(value: unknown, dossier: SongDossier, track: Clea
   const literalTerms = sanitizeLiteralSearchTerms(strings(brief.literal_search_terms, 8), track, 2);
   if (!terms.length) throw new Error("The visual brief did not provide usable museum search terms.");
   const energy = brief.energy === "low" || brief.energy === "medium" || brief.energy === "high" ? brief.energy : "medium";
+  const valence = VALENCES.find((candidate) => candidate === brief.valence) ?? "neutral";
   return {
     confidence: dossier.confidence,
     semantic_anchors: strings(brief.semantic_anchors, 6),
@@ -172,6 +181,7 @@ export function normalizeBrief(value: unknown, dossier: SongDossier, track: Clea
     avoid: strings(brief.avoid, 4),
     mood: strings(brief.mood, 6),
     energy,
+    valence,
     palette: strings(brief.palette, 5),
     visual_motifs: strings(brief.visual_motifs, 8),
     art_movements: strings(brief.art_movements, 3),
